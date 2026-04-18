@@ -18,8 +18,9 @@ DB_USERNAME=${DB_USERNAME}
 DB_PASSWORD=${DB_PASSWORD}
 EOF
 
-php artisan config:cache
-php artisan route:cache
+php artisan config:clear
+php artisan route:clear
+php artisan cache:clear
 
 php-fpm -D
 sleep 3
