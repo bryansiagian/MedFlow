@@ -5,7 +5,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
-import '../services/api_service.dart';
+import '../config.dart';
 
 // ─────────────────────────────────────────────
 // Palette (Profesional Medan Flow)
@@ -36,8 +36,8 @@ class RouteRecommendationScreen extends StatefulWidget {
       _RouteRecommendationScreenState();
 }
 
-class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
-  final ApiService _apiService = ApiService();
+class _RouteRecommendationScreenState
+    extends State<RouteRecommendationScreen> {
   final MapController _mapController = MapController();
   List _recommendations = [];
   bool _isLoading = false;
@@ -49,26 +49,10 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
   final FocusNode _destFocusNode = FocusNode();
 
   final List<String> _popularDestinations = [
-    "Pinang Baris",
-    "Amplas",
-    "Lapangan Merdeka",
-    "Sunggal",
-    "Helvetia",
-    "Padang Bulan",
-    "Kampung Lalang",
-    "Marelan",
-    "Belawan",
-    "Binjai",
-    "Polonia",
-    "Aksara",
-    "Pancing",
-    "Pasar Petisah",
-    "Tembung",
-    "Delitua",
-    "Sei Sikambing",
-    "Pusat Pasar Medan",
-    "Petisah",
-    "Medan Kota",
+    "Pinang Baris", "Amplas", "Lapangan Merdeka", "Carrefour Multatuli",
+    "Sunggal", "Helvetia", "Padang Bulan", "Kampung Lalang",
+    "Marelan", "Belawan", "Polonia", "Aksara", "Pancing",
+    "Pasar Petisah", "Tembung", "Delitua", "Sei Sikambing",
   ];
 
   List<String> _filteredSuggestions = [];
@@ -103,22 +87,21 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
     }
-
     if (permission == LocationPermission.always ||
         permission == LocationPermission.whileInUse) {
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      if (mounted) {
-        setState(() {
-          _userPosition = position;
-          _originController.text = "Lokasi Saya Saat Ini";
-          _mapController.move(
-            LatLng(position.latitude, position.longitude),
-            14,
-          );
-        });
-      }
+      setState(() {
+        _userPosition = position;
+        _originController.text = "Lokasi Saya Saat Ini";
+        _mapController.move(
+          LatLng(position.latitude, position.longitude),
+          14,
+        );
+      });
+    } else {
+      setState(() => _originController.text = "Izin GPS Ditolak");
     }
   }
 
@@ -158,10 +141,22 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     _destFocusNode.requestFocus();
   }
 
+  // ─────────────────────────────────────────────
+  // Step 1: Ambil data rute dari Laravel
+  // Step 2: Ambil geometry dari Mapbox langsung
+  // ─────────────────────────────────────────────
   Future<void> _fetchSmartRoutes() async {
     final dest = _destController.text.trim();
     if (dest.isEmpty) {
-      _showSnack("Masukkan tujuan terlebih dahulu.");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text("Masukkan tujuan terlebih dahulu."),
+          backgroundColor: _P.b600,
+          behavior: SnackBarBehavior.floating,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
       return;
     }
 
@@ -172,44 +167,91 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     });
 
     try {
-      // Pastikan baseUrl sudah benar (tidak pakai titik dua sebelum /api)
-      String url = "${_apiService.baseUrl}/recommendations";
+      // Step 1: Ambil data rute dari Laravel
       final queryParams = <String, String>{'dest': dest};
-
       if (_userPosition != null) {
         queryParams['lat'] = _userPosition!.latitude.toString();
         queryParams['lng'] = _userPosition!.longitude.toString();
       }
-
-      final uri = Uri.parse(url).replace(queryParameters: queryParams);
-      final response = await http.get(uri).timeout(const Duration(seconds: 15));
+      final uri = Uri.parse("${AppConfig.baseUrl}/recommendations")
+          .replace(queryParameters: queryParams);
+      final response = await http.get(uri);
 
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
-        if (mounted) {
-          setState(() {
-            _recommendations = data;
-            _selectedRouteIndex = data.isNotEmpty ? 0 : null;
-          });
-          if (_recommendations.isNotEmpty &&
-              _recommendations[0]['geometry'] != null) {
-            _drawRoute(_recommendations[0]['geometry'], index: 0);
+
+        // Step 2: Ambil geometry dari Mapbox langsung (dari Flutter)
+        if (_userPosition != null && data.isNotEmpty) {
+          final destLat = (data[0]['dest_lat'] as num).toDouble();
+          final destLng = (data[0]['dest_lng'] as num).toDouble();
+
+          final geometry = await _fetchMapboxGeometry(
+            _userPosition!.latitude,
+            _userPosition!.longitude,
+            destLat,
+            destLng,
+          );
+
+          for (var item in data) {
+            item['geometry'] = geometry;
           }
         }
-      } else {
-        _showSnack("Server bermasalah (Error ${response.statusCode})");
+
+        setState(() {
+          _recommendations = data;
+          _selectedRouteIndex = data.isNotEmpty ? 0 : null;
+        });
+
+        if (_recommendations.isNotEmpty) {
+          _drawRoute(_recommendations[0]['geometry'], index: 0);
+        }
       }
     } catch (e) {
-      _showSnack("Koneksi gagal. Periksa server Laravel Anda.");
+      debugPrint("Error: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Gagal memuat rute: $e"),
+            backgroundColor: Colors.redAccent,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void _showSnack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
-    );
+  // ─────────────────────────────────────────────
+  // Call Mapbox API langsung dari Flutter
+  // ─────────────────────────────────────────────
+  Future<List> _fetchMapboxGeometry(
+    double originLat,
+    double originLng,
+    double destLat,
+    double destLng,
+  ) async {
+    try {
+      final url = Uri.parse(
+        "https://api.mapbox.com/directions/v5/mapbox/driving-traffic"
+        "/$originLng,$originLat;$destLng,$destLat",
+      ).replace(queryParameters: {
+        'geometries': 'geojson',
+        'overview': 'full',
+        'access_token': AppConfig.mapboxToken,
+      });
+
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['routes'] != null && data['routes'].isNotEmpty) {
+          return data['routes'][0]['geometry']['coordinates'];
+        }
+      }
+    } catch (e) {
+      debugPrint("Mapbox error: $e");
+    }
+    return [];
   }
 
   void _drawRoute(dynamic geometry, {int? index}) {
@@ -246,11 +288,8 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
               border: Border.all(color: _P.b100, width: 1.5),
             ),
             child: IconButton(
-              icon: const Icon(
-                Icons.arrow_back_ios_new,
-                size: 16,
-                color: _P.b600,
-              ),
+              icon: const Icon(Icons.arrow_back_ios_new,
+                  size: 16, color: _P.b600),
               onPressed: () => Navigator.pop(context),
             ),
           ),
@@ -281,7 +320,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
               children: [
                 TileLayer(
                   urlTemplate:
-                      'https://api.mapbox.com/styles/v1/${ApiService.mapboxTrafficStyle}/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}',
+                      'https://api.mapbox.com/styles/v1/mapbox/traffic-day-v2/tiles/256/{z}/{x}/{y}@2x?access_token=${AppConfig.mapboxToken}',
                   userAgentPackageName: 'com.medanflow.app',
                 ),
                 PolylineLayer(
@@ -327,6 +366,8 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                   ),
               ],
             ),
+
+            // Search Card
             Positioned(
               top: MediaQuery.of(context).padding.top + 66,
               left: 20,
@@ -337,7 +378,10 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                   color: _P.card,
                   borderRadius: BorderRadius.circular(22),
                   boxShadow: [
-                    BoxShadow(color: _P.b500.withOpacity(0.1), blurRadius: 16),
+                    BoxShadow(
+                      color: _P.b500.withOpacity(0.1),
+                      blurRadius: 16,
+                    ),
                   ],
                 ),
                 child: Column(
@@ -380,6 +424,8 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 ),
               ),
             ),
+
+            // Zoom Controls
             Positioned(
               right: 16,
               top: MediaQuery.of(context).size.height * 0.42,
@@ -403,6 +449,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 ],
               ),
             ),
+
             _buildDraggableResults(),
           ],
         ),
@@ -423,15 +470,30 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 controller: _destController,
                 focusNode: _destFocusNode,
                 onChanged: _onDestChanged,
+                onTap: () => _onDestChanged(_destController.text),
                 style: const TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
                   color: _P.ink,
                 ),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   isDense: true,
                   border: InputBorder.none,
                   hintText: "Ketik tujuan...",
+                  hintStyle: const TextStyle(
+                    color: _P.ink4,
+                    fontWeight: FontWeight.normal,
+                  ),
+                  suffixIcon: _destController.text.isNotEmpty
+                      ? GestureDetector(
+                          onTap: _clearDest,
+                          child: const Icon(
+                            Icons.close_rounded,
+                            size: 18,
+                            color: _P.ink4,
+                          ),
+                        )
+                      : null,
                 ),
               ),
             ),
@@ -439,10 +501,11 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
         ),
         if (_showSuggestions)
           Container(
-            margin: const EdgeInsets.only(top: 6),
+            margin: const EdgeInsets.only(left: 32, top: 6),
             decoration: BoxDecoration(
               color: _P.card,
               borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: _P.b100),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withOpacity(0.08),
@@ -450,15 +513,49 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 ),
               ],
             ),
-            child: Column(
-              children: _filteredSuggestions
-                  .map(
-                    (s) => ListTile(
-                      title: Text(s, style: const TextStyle(fontSize: 13)),
-                      onTap: () => _selectDestination(s),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: _filteredSuggestions.asMap().entries.map((entry) {
+                  final isLast = entry.key == _filteredSuggestions.length - 1;
+                  return InkWell(
+                    onTap: () => _selectDestination(entry.value),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        border: isLast
+                            ? null
+                            : const Border(
+                                bottom:
+                                    BorderSide(color: _P.b100, width: 0.5),
+                              ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.location_on_outlined,
+                            size: 15,
+                            color: _P.ink4,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            entry.value,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: _P.ink2,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  )
-                  .toList(),
+                  );
+                }).toList(),
+              ),
             ),
           ),
       ],
@@ -525,15 +622,13 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
           ),
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: _P.b100,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: _P.b100,
+                  borderRadius: BorderRadius.circular(10),
                 ),
               ),
               const Padding(
@@ -541,7 +636,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 child: Text(
                   'OPSI RUTE TERBAIK',
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: 12,
                     fontWeight: FontWeight.w800,
                     color: _P.ink2,
                   ),
@@ -549,13 +644,43 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
               ),
               Expanded(
                 child: _recommendations.isEmpty
-                    ? const Center(child: Text("Silakan cari rute di atas"))
+                    ? SingleChildScrollView(
+                        controller: scrollController,
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const SizedBox(height: 10),
+                              Icon(
+                                Icons.alt_route_rounded,
+                                color: _P.b300,
+                                size: 40,
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Cari rute di atas',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: _P.ink3,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              const SizedBox(height: 20),
+                            ],
+                          ),
+                        ),
+                      )
                     : ListView.builder(
                         controller: scrollController,
-                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 10,
+                        ),
                         itemCount: _recommendations.length,
-                        itemBuilder: (context, index) =>
-                            _buildRouteCard(_recommendations[index], index),
+                        itemBuilder: (context, index) {
+                          final item = _recommendations[index];
+                          return _buildRouteCard(item, index);
+                        },
                       ),
               ),
             ],
@@ -582,7 +707,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
             Column(
               children: [
                 Text(
-                  item['eta']?.split(" ")[0] ?? "0",
+                  item['eta']?.toString().split(" ")[0] ?? "0",
                   style: const TextStyle(
                     fontSize: 24,
                     fontWeight: FontWeight.w900,
