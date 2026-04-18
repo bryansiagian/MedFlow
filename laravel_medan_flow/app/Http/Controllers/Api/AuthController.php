@@ -13,45 +13,57 @@ class AuthController extends Controller
 {
     public function registerDriver(Request $request)
     {
-        $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'email' => 'required|email|unique:users',
-            'password' => 'required|min:8',
-            'vehicle_plate' => 'required',
-            'angkot_id' => 'required|exists:angkots,id'
-        ]);
-
-        if ($validator->fails()) return response()->json($validator->errors(), 422);
-
-        return DB::transaction(function () use ($request) {
-            // 1. Buat User
-            $user = User::create([
-                'name' => $request->name,
-                'email' => $request->email,
-                'password' => Hash::make($request->password),
-                'role_id' => 2, // Driver
+        try {
+            $validator = Validator::make($request->all(), [
+                'name' => 'required|string|max:255',
+                'email' => 'required|email|unique:users',
+                'password' => 'required|min:8',
+                'vehicle_plate' => 'required',
+                'angkot_id' => 'required|exists:angkots,id'
             ]);
 
-            // 2. Buat Driver Pending
-            Driver::create([
-                'user_id' => $user->id,
-                'angkot_id' => $request->angkot_id,
-                'vehicle_plate' => $request->vehicle_plate,
-                'status' => 'pending', // Wajib persetujuan Admin
-            ]);
+            if ($validator->fails()) {
+                return response()->json($validator->errors(), 422);
+            }
 
-            // 3. Generate & Kirim OTP
-            $otpCode = rand(100000, 999999);
-            DB::table('otps')->insert([
-                'email' => $request->email,
-                'code' => $otpCode,
-                'expires_at' => Carbon::now()->addMinutes(10)
-            ]);
+            return DB::transaction(function () use ($request) {
 
-            Mail::to($request->email)->send(new OtpMail($otpCode));
+                $user = User::create([
+                    'name' => $request->name,
+                    'email' => $request->email,
+                    'password' => Hash::make($request->password),
+                    'role_id' => 2,
+                ]);
 
-            return response()->json(['message' => 'Registrasi berhasil. Silakan cek email untuk kode OTP.']);
-        });
+                Driver::create([
+                    'user_id' => $user->id,
+                    'angkot_id' => $request->angkot_id,
+                    'vehicle_plate' => $request->vehicle_plate,
+                    'status' => 'pending',
+                ]);
+
+                $otpCode = rand(100000, 999999);
+
+                DB::table('otps')->insert([
+                    'email' => $request->email,
+                    'code' => $otpCode,
+                    'expires_at' => Carbon::now()->addMinutes(10)
+                ]);
+
+                Mail::to($request->email)->send(new OtpMail($otpCode));
+
+                return response()->json([
+                    'message' => 'Registrasi berhasil. Silakan cek email OTP.'
+                ]);
+
+            });
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Register gagal',
+                'error' => $e->getMessage()
+            ], 500);
+        }
     }
 
     public function verifyOtp(Request $request)

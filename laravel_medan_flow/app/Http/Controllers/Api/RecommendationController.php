@@ -52,7 +52,7 @@ class RecommendationController extends Controller
 
                 if ($userLat && $userLng) {
                     // Gunakan driving-traffic untuk akurasi kemacetan
-                    $url = "https://api.mapbox.com/directions/v5/mapbox/driving-traffic/{$userLng},{$userLat};{$destLng},{$destLat}";
+                    $url = "https://api.mapbox.com/directions/v5/mapbox/driving/{$userLng},{$userLat};{$destLng},{$destLat}";
 
                     $response = Http::withoutVerifying()->get($url, [
                         'geometries'   => 'geojson',
