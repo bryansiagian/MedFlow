@@ -26,7 +26,11 @@ RUN ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
 # Permissions
 RUN chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache
 
+# Copy start script
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
 # Port 8080 adalah standar AWS App Runner
 EXPOSE 8080
 
-CMD service nginx start && php-fpm
+CMD ["/start.sh"]
