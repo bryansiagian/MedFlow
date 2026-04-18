@@ -23,6 +23,7 @@ class ApiService {
       SharedPreferences prefs = await SharedPreferences.getInstance();
       await prefs.setString('token', data['token']);
       await prefs.setInt('role_id', data['user']['role_id']);
+      await prefs.setString('user_name', data['user']['name']);
 
       return data;
     } else {
