@@ -23,6 +23,9 @@ EOF
 php artisan config:cache
 php artisan route:cache
 
-# Start services
+# Start PHP-FPM dulu, tunggu siap
 php-fpm -D
+sleep 2
+
+# Baru start Nginx
 nginx -g "daemon off;"
