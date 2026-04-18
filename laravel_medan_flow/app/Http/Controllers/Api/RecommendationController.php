@@ -12,6 +12,8 @@ class RecommendationController extends Controller
     {
         try {
             $destName = $request->query('dest');
+            $userLat = $request->query('lat');
+            $userLng = $request->query('lng');
 
             $routes = Route::all();
             if ($routes->isEmpty()) {
@@ -42,15 +44,37 @@ class RecommendationController extends Controller
 
             $target = $locations[$destName] ?? ["lat" => 3.6031, "lng" => 98.6250];
 
-            $recommendations = $routes->map(function ($route) use ($target) {
+            $recommendations = $routes->map(function ($route) use ($target, $userLat, $userLng) {
+
+                // --- LOGIKA PERHITUNGAN DINAMIS ---
+                $distKm = 0;
+                $etaMinutes = 20; // default
+
+                if ($userLat && $userLng) {
+                    // 1. Hitung jarak lurus (Haversine) dari GPS User ke Tujuan
+                    $distKm = $this->calculateDistance($userLat, $userLng, $target['lat'], $target['lng']);
+
+                    // 2. Estimasi Waktu (Asumsi kecepatan rata-rata angkot Medan + macet = 18 km/jam)
+                    // Rumus: (Jarak / Kecepatan) * 60 menit
+                    $etaMinutes = ($distKm / 18) * 60;
+                } else {
+                    $distKm = $route->distance;
+                    $etaMinutes = ($distKm / 18) * 60;
+                }
+
                 return [
                     'id'       => $route->id,
                     'name'     => $route->name,
-                    'distance' => $route->distance . " km",
-                    'eta'      => $route->eta ?? "20 Menit",
-                    'congestion' => 'low',
+                    'distance' => round($distKm, 1) . " km",
+                    'eta'      => round($etaMinutes) . " Menit",
+                    'congestion' => $etaMinutes > 40 ? 'high' : 'low',
                     'dest_lat' => $target['lat'],
                     'dest_lng' => $target['lng'],
+                    // Kita sertakan geometri garis lurus sebagai fallback awal
+                    'geometry' => [
+                        [$userLng ?? 98.6722, $userLat ?? 3.5952],
+                        [$target['lng'], $target['lat']]
+                    ]
                 ];
             });
 
@@ -62,5 +86,17 @@ class RecommendationController extends Controller
                 'error'   => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Rumus Haversine untuk menghitung jarak antara 2 koordinat GPS
+     */
+    private function calculateDistance($lat1, $lon1, $lat2, $lon2) {
+        $earthRadius = 6371; // km
+        $dLat = deg2rad($lat2 - $lat1);
+        $dLon = deg2rad($lon2 - $lon1);
+        $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon/2) * sin($dLon/2);
+        $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+        return $earthRadius * $c;
     }
 }

@@ -5,6 +5,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
+import 'package:flutter_medan_flow/services/api_service.dart';
 import '../config.dart';
 
 // ─────────────────────────────────────────────
@@ -36,8 +37,7 @@ class RouteRecommendationScreen extends StatefulWidget {
       _RouteRecommendationScreenState();
 }
 
-class _RouteRecommendationScreenState
-    extends State<RouteRecommendationScreen> {
+class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
   final MapController _mapController = MapController();
   List _recommendations = [];
   bool _isLoading = false;
@@ -49,10 +49,23 @@ class _RouteRecommendationScreenState
   final FocusNode _destFocusNode = FocusNode();
 
   final List<String> _popularDestinations = [
-    "Pinang Baris", "Amplas", "Lapangan Merdeka", "Carrefour Multatuli",
-    "Sunggal", "Helvetia", "Padang Bulan", "Kampung Lalang",
-    "Marelan", "Belawan", "Polonia", "Aksara", "Pancing",
-    "Pasar Petisah", "Tembung", "Delitua", "Sei Sikambing",
+    "Pinang Baris",
+    "Amplas",
+    "Lapangan Merdeka",
+    "Carrefour Multatuli",
+    "Sunggal",
+    "Helvetia",
+    "Padang Bulan",
+    "Kampung Lalang",
+    "Marelan",
+    "Belawan",
+    "Polonia",
+    "Aksara",
+    "Pancing",
+    "Pasar Petisah",
+    "Tembung",
+    "Delitua",
+    "Sei Sikambing",
   ];
 
   List<String> _filteredSuggestions = [];
@@ -92,16 +105,18 @@ class _RouteRecommendationScreenState
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      setState(() {
-        _userPosition = position;
-        _originController.text = "Lokasi Saya Saat Ini";
-        _mapController.move(
-          LatLng(position.latitude, position.longitude),
-          14,
-        );
-      });
+      if (mounted) {
+        setState(() {
+          _userPosition = position;
+          _originController.text = "Lokasi Saya Saat Ini";
+          _mapController.move(
+            LatLng(position.latitude, position.longitude),
+            14,
+          );
+        });
+      }
     } else {
-      setState(() => _originController.text = "Izin GPS Ditolak");
+      if (mounted) setState(() => _originController.text = "Izin GPS Ditolak");
     }
   }
 
@@ -141,22 +156,13 @@ class _RouteRecommendationScreenState
     _destFocusNode.requestFocus();
   }
 
-  // ─────────────────────────────────────────────
-  // Step 1: Ambil data rute dari Laravel
-  // Step 2: Ambil geometry dari Mapbox langsung
-  // ─────────────────────────────────────────────
+  // ── LOGIKA HYBRID ANALYTICS (Laravel + Mapbox Direct) ──────────────────
   Future<void> _fetchSmartRoutes() async {
     final dest = _destController.text.trim();
     if (dest.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text("Masukkan tujuan terlebih dahulu."),
-          backgroundColor: _P.b600,
-          behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("Pilih tujuan dulu")));
       return;
     }
 
@@ -167,31 +173,33 @@ class _RouteRecommendationScreenState
     });
 
     try {
-      // Step 1: Ambil data rute dari Laravel
+      // Step 1: Panggil Laravel untuk ambil data rute dari Sydney RDS
       final queryParams = <String, String>{'dest': dest};
       if (_userPosition != null) {
         queryParams['lat'] = _userPosition!.latitude.toString();
         queryParams['lng'] = _userPosition!.longitude.toString();
       }
-      final uri = Uri.parse("${AppConfig.baseUrl}/recommendations")
-          .replace(queryParameters: queryParams);
+      final uri = Uri.parse(
+        "${AppConfig.baseUrl}/recommendations",
+      ).replace(queryParameters: queryParams);
       final response = await http.get(uri);
 
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
 
-        // Step 2: Ambil geometry dari Mapbox langsung (dari Flutter)
+        // Step 2: Ambil rute jalan meliuk (Geometry) langsung dari Mapbox API (Bypass AWS Proxy)
         if (_userPosition != null && data.isNotEmpty) {
-          final destLat = (data[0]['dest_lat'] as num).toDouble();
-          final destLng = (data[0]['dest_lng'] as num).toDouble();
+          final dLat = (data[0]['dest_lat'] as num).toDouble();
+          final dLng = (data[0]['dest_lng'] as num).toDouble();
 
           final geometry = await _fetchMapboxGeometry(
             _userPosition!.latitude,
             _userPosition!.longitude,
-            destLat,
-            destLng,
+            dLat,
+            dLng,
           );
 
+          // Masukkan geometry ke semua hasil rute
           for (var item in data) {
             item['geometry'] = geometry;
           }
@@ -207,68 +215,46 @@ class _RouteRecommendationScreenState
         }
       }
     } catch (e) {
-      debugPrint("Error: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Gagal memuat rute: $e"),
-            backgroundColor: Colors.redAccent,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+      debugPrint("Analysis Error: $e");
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  // ─────────────────────────────────────────────
-  // Call Mapbox API langsung dari Flutter
-  // ─────────────────────────────────────────────
+  // Fungsi memanggil Mapbox langsung (Anti-timeout AWS)
   Future<List> _fetchMapboxGeometry(
-    double originLat,
-    double originLng,
-    double destLat,
-    double destLng,
+    double oLat,
+    double oLng,
+    double dLat,
+    double dLng,
   ) async {
     try {
-      final url = Uri.parse(
-        "https://api.mapbox.com/directions/v5/mapbox/driving-traffic"
-        "/$originLng,$originLat;$destLng,$destLat",
-      ).replace(queryParameters: {
-        'geometries': 'geojson',
-        'overview': 'full',
-        'access_token': AppConfig.mapboxToken,
-      });
-
-      final response = await http.get(url);
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['routes'] != null && data['routes'].isNotEmpty) {
-          return data['routes'][0]['geometry']['coordinates'];
-        }
+      final url =
+          "https://api.mapbox.com/directions/v5/mapbox/driving-traffic/$oLng,$oLat;$dLng,$dLat"
+          "?geometries=geojson&overview=full&access_token=${AppConfig.mapboxToken}";
+      final res = await http.get(Uri.parse(url));
+      if (res.statusCode == 200) {
+        return jsonDecode(res.body)['routes'][0]['geometry']['coordinates'];
       }
     } catch (e) {
-      debugPrint("Mapbox error: $e");
+      debugPrint("Mapbox Direct Error: $e");
     }
     return [];
   }
 
   void _drawRoute(dynamic geometry, {int? index}) {
     if (geometry == null || geometry is! List || geometry.isEmpty) return;
-    List<LatLng> points = [];
-    for (var coord in geometry) {
-      points.add(
-        LatLng((coord[1] as num).toDouble(), (coord[0] as num).toDouble()),
-      );
-    }
+    List<LatLng> points = geometry
+        .map<LatLng>(
+          (c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
+        )
+        .toList();
     setState(() {
       _currentPolyline = points;
       if (index != null) _selectedRouteIndex = index;
     });
-    if (points.isNotEmpty) {
-      _mapController.move(points[points.length ~/ 2], 13.0);
-    }
+    if (points.isNotEmpty)
+      _mapController.move(points[points.length ~/ 2], 12.0);
   }
 
   @override
@@ -288,8 +274,11 @@ class _RouteRecommendationScreenState
               border: Border.all(color: _P.b100, width: 1.5),
             ),
             child: IconButton(
-              icon: const Icon(Icons.arrow_back_ios_new,
-                  size: 16, color: _P.b600),
+              icon: const Icon(
+                Icons.arrow_back_ios_new,
+                size: 16,
+                color: _P.b600,
+              ),
               onPressed: () => Navigator.pop(context),
             ),
           ),
@@ -366,8 +355,6 @@ class _RouteRecommendationScreenState
                   ),
               ],
             ),
-
-            // Search Card
             Positioned(
               top: MediaQuery.of(context).padding.top + 66,
               left: 20,
@@ -378,10 +365,7 @@ class _RouteRecommendationScreenState
                   color: _P.card,
                   borderRadius: BorderRadius.circular(22),
                   boxShadow: [
-                    BoxShadow(
-                      color: _P.b500.withOpacity(0.1),
-                      blurRadius: 16,
-                    ),
+                    BoxShadow(color: _P.b500.withOpacity(0.1), blurRadius: 16),
                   ],
                 ),
                 child: Column(
@@ -424,8 +408,6 @@ class _RouteRecommendationScreenState
                 ),
               ),
             ),
-
-            // Zoom Controls
             Positioned(
               right: 16,
               top: MediaQuery.of(context).size.height * 0.42,
@@ -449,7 +431,6 @@ class _RouteRecommendationScreenState
                 ],
               ),
             ),
-
             _buildDraggableResults(),
           ],
         ),
@@ -470,30 +451,15 @@ class _RouteRecommendationScreenState
                 controller: _destController,
                 focusNode: _destFocusNode,
                 onChanged: _onDestChanged,
-                onTap: () => _onDestChanged(_destController.text),
                 style: const TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
                   color: _P.ink,
                 ),
-                decoration: InputDecoration(
+                decoration: const InputDecoration(
                   isDense: true,
                   border: InputBorder.none,
                   hintText: "Ketik tujuan...",
-                  hintStyle: const TextStyle(
-                    color: _P.ink4,
-                    fontWeight: FontWeight.normal,
-                  ),
-                  suffixIcon: _destController.text.isNotEmpty
-                      ? GestureDetector(
-                          onTap: _clearDest,
-                          child: const Icon(
-                            Icons.close_rounded,
-                            size: 18,
-                            color: _P.ink4,
-                          ),
-                        )
-                      : null,
                 ),
               ),
             ),
@@ -501,7 +467,7 @@ class _RouteRecommendationScreenState
         ),
         if (_showSuggestions)
           Container(
-            margin: const EdgeInsets.only(left: 32, top: 6),
+            margin: const EdgeInsets.only(top: 6),
             decoration: BoxDecoration(
               color: _P.card,
               borderRadius: BorderRadius.circular(14),
@@ -513,49 +479,15 @@ class _RouteRecommendationScreenState
                 ),
               ],
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: _filteredSuggestions.asMap().entries.map((entry) {
-                  final isLast = entry.key == _filteredSuggestions.length - 1;
-                  return InkWell(
-                    onTap: () => _selectDestination(entry.value),
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        border: isLast
-                            ? null
-                            : const Border(
-                                bottom:
-                                    BorderSide(color: _P.b100, width: 0.5),
-                              ),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(
-                            Icons.location_on_outlined,
-                            size: 15,
-                            color: _P.ink4,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            entry.value,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: _P.ink2,
-                            ),
-                          ),
-                        ],
-                      ),
+            child: Column(
+              children: _filteredSuggestions
+                  .map(
+                    (s) => ListTile(
+                      title: Text(s, style: const TextStyle(fontSize: 13)),
+                      onTap: () => _selectDestination(s),
                     ),
-                  );
-                }).toList(),
-              ),
+                  )
+                  .toList(),
             ),
           ),
       ],
@@ -636,7 +568,7 @@ class _RouteRecommendationScreenState
                 child: Text(
                   'OPSI RUTE TERBAIK',
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     fontWeight: FontWeight.w800,
                     color: _P.ink2,
                   ),
@@ -646,41 +578,16 @@ class _RouteRecommendationScreenState
                 child: _recommendations.isEmpty
                     ? SingleChildScrollView(
                         controller: scrollController,
-                        child: Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const SizedBox(height: 10),
-                              Icon(
-                                Icons.alt_route_rounded,
-                                color: _P.b300,
-                                size: 40,
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                'Cari rute di atas',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: _P.ink3,
-                                  fontSize: 13,
-                                ),
-                              ),
-                              const SizedBox(height: 20),
-                            ],
-                          ),
+                        child: const Center(
+                          child: Text("Klik tombol Analisis di atas"),
                         ),
                       )
                     : ListView.builder(
                         controller: scrollController,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 10,
-                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
                         itemCount: _recommendations.length,
-                        itemBuilder: (context, index) {
-                          final item = _recommendations[index];
-                          return _buildRouteCard(item, index);
-                        },
+                        itemBuilder: (context, index) =>
+                            _buildRouteCard(_recommendations[index], index),
                       ),
               ),
             ],
@@ -701,28 +608,44 @@ class _RouteRecommendationScreenState
           color: isSelected ? _P.b50 : _P.card,
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: isSelected ? _P.b400 : _P.b100),
+          boxShadow: [
+            BoxShadow(
+              color: _P.b500.withOpacity(isSelected ? 0.12 : 0.05),
+              blurRadius: isSelected ? 14 : 8,
+              offset: const Offset(0, 3),
+            ),
+          ],
         ),
         child: Row(
           children: [
-            Column(
-              children: [
-                Text(
-                  item['eta']?.toString().split(" ")[0] ?? "0",
-                  style: const TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.w900,
-                    color: _P.b600,
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                gradient: isSelected
+                    ? const LinearGradient(colors: [_P.b500, _P.b700])
+                    : const LinearGradient(colors: [_P.b50, _P.b100]),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                children: [
+                  Text(
+                    item['eta'].split(" ")[0],
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w900,
+                      color: isSelected ? Colors.white : _P.b600,
+                    ),
                   ),
-                ),
-                const Text(
-                  'MENIT',
-                  style: TextStyle(
-                    fontSize: 9,
-                    fontWeight: FontWeight.bold,
-                    color: _P.ink4,
+                  Text(
+                    'MENIT',
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                      color: isSelected ? Colors.white70 : _P.ink4,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
             const SizedBox(width: 20),
             Expanded(
@@ -730,20 +653,24 @@ class _RouteRecommendationScreenState
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    item['name'] ?? "Rute Medan",
+                    item['name'],
                     style: const TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 15,
                     ),
                   ),
                   Text(
-                    item['distance']?.toString() ?? "-",
+                    item['distance'],
                     style: const TextStyle(fontSize: 12, color: _P.ink3),
                   ),
                 ],
               ),
             ),
-            const Icon(Icons.directions_rounded, color: _P.b400, size: 24),
+            Icon(
+              Icons.directions_rounded,
+              color: isSelected ? _P.b600 : _P.b400,
+              size: 24,
+            ),
           ],
         ),
       ),
