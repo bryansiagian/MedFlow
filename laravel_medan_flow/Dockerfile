@@ -31,6 +31,7 @@ COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
 # Port 8080 adalah standar AWS App Runner
+COPY php-fpm-custom.conf /usr/local/etc/php-fpm.d/zzz-custom.conf
 EXPOSE 8080
 
 CMD ["/start.sh"]

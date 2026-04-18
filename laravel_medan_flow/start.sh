@@ -1,7 +1,6 @@
 #!/bin/bash
 cd /var/www
 
-# Buat file .env dari environment variables
 cat > .env << EOF
 APP_NAME=${APP_NAME}
 APP_ENV=${APP_ENV}
@@ -19,13 +18,10 @@ DB_USERNAME=${DB_USERNAME}
 DB_PASSWORD=${DB_PASSWORD}
 EOF
 
-# Cache config
 php artisan config:cache
 php artisan route:cache
 
-# Start PHP-FPM dulu, tunggu siap
 php-fpm -D
-sleep 2
+sleep 3
 
-# Baru start Nginx
 nginx -g "daemon off;"
