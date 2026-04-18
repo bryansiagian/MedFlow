@@ -48,12 +48,10 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
   final TextEditingController _destController = TextEditingController();
   final FocusNode _destFocusNode = FocusNode();
 
-  // Daftar tujuan populer Medan
   final List<String> _popularDestinations = [
     "Pinang Baris",
     "Amplas",
     "Lapangan Merdeka",
-    "Carrefour Multatuli",
     "Sunggal",
     "Helvetia",
     "Padang Bulan",
@@ -71,15 +69,6 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     "Pusat Pasar Medan",
     "Petisah",
     "Medan Kota",
-    "Medan Baru",
-    "Medan Selayang",
-    "Medan Deli",
-    "Medan Belawan",
-    "Ringroad",
-    "Gatot Subroto",
-    "Iskandar Muda",
-    "Nibung Raya",
-    "Brigjen Katamso",
   ];
 
   List<String> _filteredSuggestions = [];
@@ -110,7 +99,6 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
 
   Future<void> _determinePosition() async {
     setState(() => _originController.text = "Mendeteksi GPS...");
-
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
@@ -121,17 +109,16 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-
-      setState(() {
-        _userPosition = position;
-        _originController.text = "Lokasi Saya Saat Ini";
-        _mapController.move(
-          LatLng(position.latitude, position.longitude),
-          14,
-        );
-      });
-    } else {
-      setState(() => _originController.text = "Izin GPS Ditolak");
+      if (mounted) {
+        setState(() {
+          _userPosition = position;
+          _originController.text = "Lokasi Saya Saat Ini";
+          _mapController.move(
+            LatLng(position.latitude, position.longitude),
+            14,
+          );
+        });
+      }
     }
   }
 
@@ -174,14 +161,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
   Future<void> _fetchSmartRoutes() async {
     final dest = _destController.text.trim();
     if (dest.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text("Masukkan tujuan terlebih dahulu."),
-          backgroundColor: _P.b600,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        ),
-      );
+      _showSnack("Masukkan tujuan terlebih dahulu.");
       return;
     }
 
@@ -192,30 +172,44 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     });
 
     try {
-      String url = "${ApiService().baseUrl}/recommendations";
+      // Pastikan baseUrl sudah benar (tidak pakai titik dua sebelum /api)
+      String url = "${_apiService.baseUrl}/recommendations";
       final queryParams = <String, String>{'dest': dest};
+
       if (_userPosition != null) {
         queryParams['lat'] = _userPosition!.latitude.toString();
         queryParams['lng'] = _userPosition!.longitude.toString();
       }
+
       final uri = Uri.parse(url).replace(queryParameters: queryParams);
-      final response = await http.get(uri);
+      final response = await http.get(uri).timeout(const Duration(seconds: 15));
+
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
-        setState(() {
-          _recommendations = data;
-          _selectedRouteIndex = data.isNotEmpty ? 0 : null;
-        });
-        if (_recommendations.isNotEmpty &&
-            _recommendations[0]['geometry'] != null) {
-          _drawRoute(_recommendations[0]['geometry'], index: 0);
+        if (mounted) {
+          setState(() {
+            _recommendations = data;
+            _selectedRouteIndex = data.isNotEmpty ? 0 : null;
+          });
+          if (_recommendations.isNotEmpty &&
+              _recommendations[0]['geometry'] != null) {
+            _drawRoute(_recommendations[0]['geometry'], index: 0);
+          }
         }
+      } else {
+        _showSnack("Server bermasalah (Error ${response.statusCode})");
       }
     } catch (e) {
-      debugPrint("Error: $e");
+      _showSnack("Koneksi gagal. Periksa server Laravel Anda.");
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  void _showSnack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
   }
 
   void _drawRoute(dynamic geometry, {int? index}) {
@@ -252,7 +246,11 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
               border: Border.all(color: _P.b100, width: 1.5),
             ),
             child: IconButton(
-              icon: const Icon(Icons.arrow_back_ios_new, size: 16, color: _P.b600),
+              icon: const Icon(
+                Icons.arrow_back_ios_new,
+                size: 16,
+                color: _P.b600,
+              ),
               onPressed: () => Navigator.pop(context),
             ),
           ),
@@ -329,8 +327,6 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                   ),
               ],
             ),
-
-            // Search Card
             Positioned(
               top: MediaQuery.of(context).padding.top + 66,
               left: 20,
@@ -341,16 +337,12 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                   color: _P.card,
                   borderRadius: BorderRadius.circular(22),
                   boxShadow: [
-                    BoxShadow(
-                      color: _P.b500.withOpacity(0.1),
-                      blurRadius: 16,
-                    ),
+                    BoxShadow(color: _P.b500.withOpacity(0.1), blurRadius: 16),
                   ],
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Input asal (read-only, dari GPS)
                     _buildSearchInput(
                       Icons.my_location_rounded,
                       "Asal",
@@ -358,10 +350,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                       _P.b600,
                     ),
                     const Divider(height: 24),
-
-                    // Input tujuan (editable + suggestions)
                     _buildEditableDestInput(),
-
                     const SizedBox(height: 16),
                     SizedBox(
                       width: double.infinity,
@@ -391,8 +380,6 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 ),
               ),
             ),
-
-            // Zoom Controls
             Positioned(
               right: 16,
               top: MediaQuery.of(context).size.height * 0.42,
@@ -416,7 +403,6 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 ],
               ),
             ),
-
             _buildDraggableResults(),
           ],
         ),
@@ -437,90 +423,42 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 controller: _destController,
                 focusNode: _destFocusNode,
                 onChanged: _onDestChanged,
-                onTap: () => _onDestChanged(_destController.text),
                 style: const TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
                   color: _P.ink,
                 ),
-                decoration: InputDecoration(
+                decoration: const InputDecoration(
                   isDense: true,
                   border: InputBorder.none,
                   hintText: "Ketik tujuan...",
-                  hintStyle: const TextStyle(
-                    color: _P.ink4,
-                    fontWeight: FontWeight.normal,
-                  ),
-                  suffixIcon: _destController.text.isNotEmpty
-                      ? GestureDetector(
-                          onTap: _clearDest,
-                          child: const Icon(
-                            Icons.close_rounded,
-                            size: 18,
-                            color: _P.ink4,
-                          ),
-                        )
-                      : null,
                 ),
               ),
             ),
           ],
         ),
-
-        // Suggestion list
         if (_showSuggestions)
           Container(
-            margin: const EdgeInsets.only(left: 32, top: 6),
+            margin: const EdgeInsets.only(top: 6),
             decoration: BoxDecoration(
               color: _P.card,
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: _P.b100),
               boxShadow: [
-                BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10),
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.08),
+                  blurRadius: 10,
+                ),
               ],
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: _filteredSuggestions.asMap().entries.map((entry) {
-                  final isLast = entry.key == _filteredSuggestions.length - 1;
-                  return InkWell(
-                    onTap: () => _selectDestination(entry.value),
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        border: isLast
-                            ? null
-                            : const Border(
-                                bottom: BorderSide(color: _P.b100, width: 0.5),
-                              ),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(
-                            Icons.location_on_outlined,
-                            size: 15,
-                            color: _P.ink4,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            entry.value,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: _P.ink2,
-                            ),
-                          ),
-                        ],
-                      ),
+            child: Column(
+              children: _filteredSuggestions
+                  .map(
+                    (s) => ListTile(
+                      title: Text(s, style: const TextStyle(fontSize: 13)),
+                      onTap: () => _selectDestination(s),
                     ),
-                  );
-                }).toList(),
-              ),
+                  )
+                  .toList(),
             ),
           ),
       ],
@@ -587,13 +525,15 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
           ),
           child: Column(
             children: [
-              Container(
-                margin: const EdgeInsets.only(top: 12),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: _P.b100,
-                  borderRadius: BorderRadius.circular(10),
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: _P.b100,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
               ),
               const Padding(
@@ -601,7 +541,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 child: Text(
                   'OPSI RUTE TERBAIK',
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     fontWeight: FontWeight.w800,
                     color: _P.ink2,
                   ),
@@ -609,43 +549,13 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
               ),
               Expanded(
                 child: _recommendations.isEmpty
-                    ? SingleChildScrollView(
-                        controller: scrollController,
-                        child: Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const SizedBox(height: 10),
-                              Icon(
-                                Icons.alt_route_rounded,
-                                color: _P.b300,
-                                size: 40,
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                'Cari rute di atas',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: _P.ink3,
-                                  fontSize: 13,
-                                ),
-                              ),
-                              const SizedBox(height: 20),
-                            ],
-                          ),
-                        ),
-                      )
+                    ? const Center(child: Text("Silakan cari rute di atas"))
                     : ListView.builder(
                         controller: scrollController,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 10,
-                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
                         itemCount: _recommendations.length,
-                        itemBuilder: (context, index) {
-                          final item = _recommendations[index];
-                          return _buildRouteCard(item, index);
-                        },
+                        itemBuilder: (context, index) =>
+                            _buildRouteCard(_recommendations[index], index),
                       ),
               ),
             ],
