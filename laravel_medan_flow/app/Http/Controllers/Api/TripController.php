@@ -47,20 +47,24 @@ class TripController extends Controller
 
     public function updateLocation(Request $request, $id)
     {
-        $request->validate([
-            'latitude' => 'required',
-            'longitude' => 'required',
-            'speed' => 'nullable'
-        ]);
+        try {
+            $request->validate([
+                'latitude' => 'required',
+                'longitude' => 'required',
+                'speed' => 'nullable'
+            ]);
 
-        TripLocation::create([
-            'trip_id' => $id,
-            'latitude' => $request->latitude,
-            'longitude' => $request->longitude,
-            'speed' => $request->speed ?? 0
-        ]);
+            TripLocation::create([
+                'trip_id' => $id,
+                'latitude' => $request->latitude,
+                'longitude' => $request->longitude,
+                'speed' => $request->speed ?? 0
+            ]);
 
-        return response()->json(['status' => 'success']);
+            return response()->json(['status' => 'success']);
+        } catch (\Exception $e) {
+            return response()->json(['message' => 'Gagal update lokasi.'], 500);
+        }
     }
 
     public function getActiveTrips()
@@ -89,5 +93,46 @@ class TripController extends Controller
         });
 
         return response()->json($data);
+    }
+
+    public function getActiveAngkots()
+    {
+        try {
+            // Ambil semua perjalanan yang sedang berlangsung
+            $trips = Trip::with(['angkot.route', 'driver.user'])
+                ->where('status', 'ongoing')
+                ->get();
+
+            $data = $trips->map(function ($trip) {
+                // Ambil lokasi GPS terakhir untuk angkot ini
+                $latestLocation = TripLocation::where('trip_id', $trip->id)
+                    ->latest()
+                    ->first();
+
+                // Logika Null-Safety: Jika data relasi ada yang kosong, jangan crash!
+                return [
+                    'trip_id'       => $trip->id,
+                    'angkot_number' => $trip->angkot->angkot_number ?? 'Tanpa No',
+                    'route_name'    => ($trip->angkot && $trip->angkot->route) ? $trip->angkot->route->name : 'Rute Umum',
+                    'driver_name'   => ($trip->driver && $trip->driver->user) ? $trip->driver->user->name : 'Driver',
+                    'latitude'      => $latestLocation ? (float)$latestLocation->latitude : 3.5952,
+                    'longitude'     => $latestLocation ? (float)$latestLocation->longitude : 98.6722,
+                    'speed'         => $latestLocation ? (float)$latestLocation->speed : 0,
+                    'eta_minutes'   => rand(5, 15),
+                    'crowd_status'  => 'Normal',
+                    'congestion'    => $trip->current_status ?? 'green',
+                ];
+            });
+
+            return response()->json($data);
+
+        } catch (\Exception $e) {
+            // Log error asli agar bisa dicek di AWS CloudWatch/Laravel Log
+            Log::error("Get Active Angkots Error: " . $e->getMessage());
+            return response()->json([
+                'message' => 'Terjadi kesalahan pada server saat memuat data angkot.',
+                'debug' => $e->getMessage() // Kita tampilkan errornya biar Anda tahu apa yang salah
+            ], 500);
+        }
     }
 }

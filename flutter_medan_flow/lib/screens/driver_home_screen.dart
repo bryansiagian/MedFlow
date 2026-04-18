@@ -6,7 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_map/flutter_map.dart'; 
 import 'package:latlong2/latlong.dart';      
-import 'package:geolocator/geolocator.dart'; // Wajib untuk Live GPS
+import 'package:geolocator/geolocator.dart'; 
 import '../providers/tracking_provider.dart';
 import '../services/api_service.dart';
 import 'landing_page.dart';
@@ -25,9 +25,8 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
   String _driverName = "Memuat...";
   final ApiService _apiService = ApiService();
 
-  // State untuk pergerakan peta lokal
   final MapController _miniMapController = MapController();
-  LatLng _currentLocation = const LatLng(3.5952, 98.6722); // Default Medan
+  LatLng _currentLocation = const LatLng(3.5952, 98.6722); 
   StreamSubscription<Position>? _positionStream;
 
   // Warna Tema Indigo Profesional
@@ -40,34 +39,31 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
     super.initState();
     _loadDriverProfile();
     _fetchInsights();
-    _initLiveLocation(); // Mulai memantau GPS
+    _initLiveLocation();
   }
 
   @override
   void dispose() {
-    _positionStream?.cancel(); // Hentikan pemantauan GPS saat keluar
+    _positionStream?.cancel();
     super.dispose();
   }
 
-  // MENDETEKSI LOKASI ASLI UNTUK TAMPILAN MAP DI HP DRIVER
   Future<void> _initLiveLocation() async {
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
     }
 
-    // Mendengarkan perubahan posisi setiap kali driver bergerak
     _positionStream = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 5, // Update jika bergerak 5 meter
+        distanceFilter: 5,
       ),
     ).listen((Position position) {
       if (mounted) {
         setState(() {
           _currentLocation = LatLng(position.latitude, position.longitude);
         });
-        // Peta otomatis mengikuti posisi driver
         _miniMapController.move(_currentLocation, 15);
       }
     });
@@ -143,8 +139,20 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
             backgroundColor: primaryColor,
             flexibleSpace: FlexibleSpaceBar(
               centerTitle: true,
-              title: const Text("MEDAN FLOW - DRIVER", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
-              background: Container(decoration: BoxDecoration(gradient: LinearGradient(colors: [primaryColor, accentColor], begin: Alignment.topCenter, end: Alignment.bottomCenter))),
+              titlePadding: const EdgeInsets.only(bottom: 16),
+              title: const Text(
+                "MEDAN FLOW - DRIVER",
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white, letterSpacing: 1.2),
+              ),
+              background: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [primaryColor, accentColor],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                  ),
+                ),
+              ),
             ),
             actions: [
               IconButton(icon: const Icon(Icons.refresh, color: Colors.white), onPressed: _fetchInsights),
@@ -159,7 +167,16 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
               children: [
                 Stack(
                   children: [
-                    Container(height: 120, decoration: BoxDecoration(gradient: LinearGradient(colors: [accentColor, scaffoldBg], begin: Alignment.topCenter, end: Alignment.bottomCenter))),
+                    Container(
+                      height: 120, 
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [accentColor, scaffoldBg],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                      ),
+                    ),
                     _buildStatusHeader(),
                   ],
                 ),
@@ -171,8 +188,6 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                     children: [
                       const Text("Pantau Posisi & Trafik", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF263238))),
                       const SizedBox(height: 15),
-                      
-                      // MINI MAP YANG MENGIKUTI GPS HP
                       _buildTrafficMiniMap(),
 
                       const SizedBox(height: 25),
@@ -229,7 +244,6 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
               userAgentPackageName: 'com.medanflow.app',
               backgroundColor: Colors.transparent,
             ),
-            // MARKER POSISI DRIVER SENDIRI (BIRU PULSE)
             MarkerLayer(
               markers: [
                 Marker(
@@ -250,12 +264,16 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
       width: double.infinity,
       margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(25), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 15, offset: const Offset(0, 5))]),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(25),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 15, offset: const Offset(0, 5))],
+      ),
       child: Consumer<TrackingProvider>(
         builder: (context, tracking, child) {
           return Row(
             children: [
-              CircleAvatar(radius: 30, backgroundColor: primaryColor.withOpacity(0.1), child: const Icon(Icons.person, color: Color(0xFF1A237E), size: 30)),
+              CircleAvatar(radius: 30, backgroundColor: primaryColor.withOpacity(0.1), child: Icon(Icons.person, color: primaryColor, size: 30)),
               const SizedBox(width: 15),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -299,7 +317,23 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
   }
 
   Widget _insightTile(String label, String value, String sub, IconData icon, Color color) {
-    return Expanded(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(22), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10)]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle), child: Icon(icon, color: color, size: 20)), const SizedBox(height: 12), Text(label, style: const TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)), const SizedBox(height: 2), Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), Text(sub, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis)])));
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(16), 
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(22), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10)]), 
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start, 
+          children: [
+            Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle), child: Icon(icon, color: color, size: 20)), 
+            const SizedBox(height: 12), 
+            Text(label, style: const TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)), 
+            const SizedBox(height: 2), 
+            Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), 
+            Text(sub, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis)
+          ]
+        )
+      )
+    );
   }
 
   Widget _buildTrackingButton(BuildContext context) {
@@ -307,12 +341,23 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
       bool active = tracking.isTracking;
       return GestureDetector(
         onTap: () => tracking.toggleTracking(),
-        child: AnimatedContainer(duration: const Duration(milliseconds: 300), width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 25), decoration: BoxDecoration(gradient: LinearGradient(colors: active ? [Colors.red.shade600, Colors.red.shade800] : [primaryColor, accentColor], begin: Alignment.topLeft, end: Alignment.bottomRight), borderRadius: BorderRadius.circular(25), boxShadow: [BoxShadow(color: (active ? Colors.red : primaryColor).withOpacity(0.3), blurRadius: 15, offset: const Offset(0, 8))]), child: Column(children: [Icon(active ? Icons.stop_circle_rounded : Icons.play_circle_fill_rounded, color: Colors.white, size: 55), const SizedBox(height: 10), Text(active ? "BERHENTI MENARIK" : "MULAI MENARIK!", style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1.2)), Text(active ? "GPS Aktif • Posisi Anda terkirim ke server" : "Klik untuk online di peta Medan", style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 11))])),
+        child: AnimatedContainer(duration: const Duration(milliseconds: 300), width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 25), decoration: BoxDecoration(gradient: LinearGradient(colors: active ? [Colors.red.shade600, Colors.red.shade800] : [primaryColor, accentColor], begin: Alignment.topLeft, end: Alignment.bottomRight), borderRadius: BorderRadius.circular(25), boxShadow: [BoxShadow(color: (active ? Colors.red : primaryColor).withOpacity(0.3), blurRadius: 15, offset: const Offset(0, 8))]), child: Column(children: [Icon(active ? Icons.stop_circle_rounded : Icons.play_circle_fill_rounded, color: Colors.white, size: 55), const SizedBox(height: 10), Text(active ? "BERHENTI MENARIK" : "MULAI MENARIK!", style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1.2)), Text(active ? "Posisi Anda sedang dipantau" : "Klik untuk online di peta Medan", style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 11))])),
       );
     });
   }
 
   Widget _buildVehicleInfo() {
-    return Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(22), border: Border.all(color: Colors.grey.shade200)), child: const Row(children: [Icon(Icons.directions_bus_rounded, color: Color(0xFF1A237E), size: 28), SizedBox(width: 15), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("KPUM 64 (BK 1234 AA)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)), Text("Trayek: Amplas - Pinang Baris", style: TextStyle(color: Colors.grey.shade600, fontSize: 12))])), Icon(Icons.verified_user_rounded, color: Colors.blue, size: 20)]));
+    return Container(
+      padding: const EdgeInsets.all(20), 
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(22), border: Border.all(color: Colors.grey.shade200)), 
+      child: Row(
+        children: [
+          Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: primaryColor.withOpacity(0.05), shape: BoxShape.circle), child: Icon(Icons.directions_bus_rounded, color: primaryColor, size: 28)), 
+          const SizedBox(width: 15), 
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("KPUM 64 (BK 1234 AA)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)), Text("Trayek: Amplas - Pinang Baris", style: TextStyle(color: Colors.grey.shade600, fontSize: 12))])), 
+          const Icon(Icons.verified_user_rounded, color: Colors.blue, size: 20)
+        ]
+      )
+    );
   }
 }
