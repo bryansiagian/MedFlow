@@ -263,32 +263,33 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
   }
 
   // ── Register Logic (unchanged) ───────────────────────────────
-  void _handleRegister() async {
-    if (_nameController.text.isEmpty ||
-        _emailController.text.isEmpty ||
-        _passController.text.isEmpty ||
-        _plateController.text.isEmpty) {
-      _showSnackBar('Harap lengkapi semua data pendaftaran.', Colors.orange);
+  Future<void> _handleRegister() async {
+    if (_nameController.text.isEmpty || _emailController.text.isEmpty || 
+        _passController.text.isEmpty || _plateController.text.isEmpty) {
+      _showSnackBar("Lengkapi form!", Colors.orange);
       return;
     }
+
     setState(() => _isLoading = true);
     try {
-      await ApiService().registerDriver({
+      final res = await ApiService().registerDriver({
         'name': _nameController.text,
         'email': _emailController.text,
         'password': _passController.text,
         'vehicle_plate': _plateController.text,
-        'angkot_id': '1',
+        'angkot_id': "1", // PASTIKAN ID 1 ADA DI TABEL ANGKOTS
       });
+      
       if (!mounted) return;
+      
+      // Jika berhasil, lanjut ke verifikasi
       Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => OtpVerificationScreen(email: _emailController.text),
-        ),
+        context, 
+        MaterialPageRoute(builder: (_) => OtpVerificationScreen(email: _emailController.text))
       );
     } catch (e) {
-      _showSnackBar(e.toString(), Colors.redAccent);
+      // PERBAIKAN: Menampilkan error string aslinya jika server mengirim HTML
+      _showSnackBar("Error: ${e.toString()}", Colors.redAccent);
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
