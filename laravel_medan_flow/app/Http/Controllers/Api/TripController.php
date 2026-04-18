@@ -8,29 +8,28 @@ use App\Models\TripLocation;
 use App\Models\Driver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log; // WAJIB ADA INI AGAR TIDAK ERROR 500
 
 class TripController extends Controller
 {
+    /**
+     * Driver Memulai Perjalanan
+     */
     public function startTrip(Request $request)
     {
-        // 1. Ambil user yang sedang login
-        $user = $request->user();
-
-        // 2. Cari data driver yang terhubung dengan user ini
-        $driver = Driver::where('user_id', $user->id)->first();
-
-        // Jika user ini ternyata tidak punya profil di tabel 'drivers'
-        if (!$driver) {
-            return response()->json([
-                'message' => 'Profil Driver tidak ditemukan. Pastikan Anda sudah terdaftar sebagai Driver.'
-            ], 404);
-        }
-
-        // 3. Buat data Trip baru
         try {
+            $user = $request->user();
+            $driver = Driver::where('user_id', $user->id)->first();
+
+            if (!$driver) {
+                return response()->json([
+                    'message' => 'Profil Driver tidak ditemukan.'
+                ], 404);
+            }
+
             $trip = Trip::create([
                 'driver_id' => $driver->id,
-                'angkot_id' => $driver->angkot_id, // Ambil angkot yang biasa dia bawa
+                'angkot_id' => $driver->angkot_id,
                 'start_time' => now(),
                 'status' => 'ongoing',
                 'current_status' => 'green',
@@ -39,12 +38,14 @@ class TripController extends Controller
 
             return response()->json($trip);
         } catch (\Exception $e) {
-            return response()->json([
-                'message' => 'Gagal membuat data perjalanan: ' . $e->getMessage()
-            ], 500);
+            Log::error("Start Trip Error: " . $e->getMessage());
+            return response()->json(['message' => 'Gagal membuat data perjalanan.'], 500);
         }
     }
 
+    /**
+     * Update Lokasi Real-time oleh Driver
+     */
     public function updateLocation(Request $request, $id)
     {
         try {
@@ -63,57 +64,34 @@ class TripController extends Controller
 
             return response()->json(['status' => 'success']);
         } catch (\Exception $e) {
+            Log::error("Update Location Error: " . $e->getMessage());
             return response()->json(['message' => 'Gagal update lokasi.'], 500);
         }
     }
 
-    public function getActiveTrips()
-    {
-        $trips = Trip::with(['angkot.route', 'driver.user'])
-            ->where('status', 'ongoing')
-            ->get();
-
-        $data = $trips->map(function ($trip) {
-            $latestLocation = TripLocation::where('trip_id', $trip->id)
-                ->latest()
-                ->first();
-
-            return [
-                'trip_id' => $trip->id,
-                'angkot_number' => $trip->angkot->angkot_number,
-                'route_name' => $trip->angkot->route->name,
-                'driver_name' => $trip->driver->user->name,
-                'latitude' => $latestLocation ? $latestLocation->latitude : 3.5952,
-                'longitude' => $latestLocation ? $latestLocation->longitude : 98.6722,
-                'speed' => $latestLocation ? $latestLocation->speed : 0,
-                'eta_minutes' => rand(2, 15),
-                'crowd_status' => 'Normal',
-                'congestion' => $trip->current_status,
-            ];
-        });
-
-        return response()->json($data);
-    }
-
+    /**
+     * Mendapatkan Daftar Angkot Aktif (UNTUK USER/GUEST)
+     * Gabungan Method yang sudah diperkuat
+     */
     public function getActiveAngkots()
     {
         try {
-            // Ambil semua perjalanan yang sedang berlangsung
+            // Eager loading relasi untuk performa dan menghindari N+1 query
             $trips = Trip::with(['angkot.route', 'driver.user'])
                 ->where('status', 'ongoing')
                 ->get();
 
             $data = $trips->map(function ($trip) {
-                // Ambil lokasi GPS terakhir untuk angkot ini
+                // Ambil koordinat terakhir
                 $latestLocation = TripLocation::where('trip_id', $trip->id)
                     ->latest()
                     ->first();
 
-                // Logika Null-Safety: Jika data relasi ada yang kosong, jangan crash!
+                // Null-Safety: Memastikan jika data relasi corrupt, API tidak mati
                 return [
                     'trip_id'       => $trip->id,
-                    'angkot_number' => $trip->angkot->angkot_number ?? 'Tanpa No',
-                    'route_name'    => ($trip->angkot && $trip->angkot->route) ? $trip->angkot->route->name : 'Rute Umum',
+                    'angkot_number' => $trip->angkot->angkot_number ?? 'N/A',
+                    'route_name'    => ($trip->angkot && $trip->angkot->route) ? $trip->angkot->route->name : 'Rute Medan',
                     'driver_name'   => ($trip->driver && $trip->driver->user) ? $trip->driver->user->name : 'Driver',
                     'latitude'      => $latestLocation ? (float)$latestLocation->latitude : 3.5952,
                     'longitude'     => $latestLocation ? (float)$latestLocation->longitude : 98.6722,
@@ -127,11 +105,10 @@ class TripController extends Controller
             return response()->json($data);
 
         } catch (\Exception $e) {
-            // Log error asli agar bisa dicek di AWS CloudWatch/Laravel Log
             Log::error("Get Active Angkots Error: " . $e->getMessage());
             return response()->json([
-                'message' => 'Terjadi kesalahan pada server saat memuat data angkot.',
-                'debug' => $e->getMessage() // Kita tampilkan errornya biar Anda tahu apa yang salah
+                'message' => 'Internal Server Error',
+                'debug' => $e->getMessage()
             ], 500);
         }
     }
