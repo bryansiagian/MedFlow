@@ -76,31 +76,55 @@ class TripController extends Controller
     public function getActiveAngkots()
     {
         try {
-            // Eager loading relasi untuk performa dan menghindari N+1 query
             $trips = Trip::with(['angkot.route', 'driver.user'])
                 ->where('status', 'ongoing')
+                ->whereHas('locations', function ($q) {
+                    // Hanya tampilkan angkot yang update lokasi dalam 5 menit terakhir
+                    $q->where('created_at', '>=', now()->subMinutes(5));
+                })
                 ->get();
 
             $data = $trips->map(function ($trip) {
-                // Ambil koordinat terakhir
                 $latestLocation = TripLocation::where('trip_id', $trip->id)
                     ->latest()
                     ->first();
 
-                // Null-Safety: Memastikan jika data relasi corrupt, API tidak mati
+                // Skip angkot yang belum pernah kirim lokasi sama sekali
+                if (!$latestLocation) return null;
+
+                // Hitung crowd_status dari jumlah penumpang jika ada, fallback ke current_status
+                $crowdStatus = match($trip->current_status ?? 'green') {
+                    'red'    => 'Penuh',
+                    'yellow' => 'Sedang',
+                    default  => 'Normal',
+                };
+
+                // Hitung ETA berdasarkan speed (km/h) dan asumsi jarak rata-rata 2km
+                $speed         = (float)($latestLocation->speed ?? 0);
+                $estimatedEta  = ($speed > 5)
+                    ? (int)round((2 / $speed) * 60)  // menit = (jarak/speed)*60
+                    : rand(8, 20);                    // fallback jika angkot diam
+
                 return [
                     'trip_id'       => $trip->id,
                     'angkot_number' => $trip->angkot->angkot_number ?? 'N/A',
-                    'route_name'    => ($trip->angkot && $trip->angkot->route) ? $trip->angkot->route->name : 'Rute Medan',
-                    'driver_name'   => ($trip->driver && $trip->driver->user) ? $trip->driver->user->name : 'Driver',
-                    'latitude'      => $latestLocation ? (float)$latestLocation->latitude : 3.5952,
-                    'longitude'     => $latestLocation ? (float)$latestLocation->longitude : 98.6722,
-                    'speed'         => $latestLocation ? (float)$latestLocation->speed : 0,
-                    'eta_minutes'   => rand(5, 15),
-                    'crowd_status'  => 'Normal',
+                    'route_name'    => ($trip->angkot && $trip->angkot->route)
+                                        ? $trip->angkot->route->name
+                                        : 'Rute Medan',
+                    'driver_name'   => ($trip->driver && $trip->driver->user)
+                                        ? $trip->driver->user->name
+                                        : 'Driver',
+                    'latitude'      => (float)$latestLocation->latitude,
+                    'longitude'     => (float)$latestLocation->longitude,
+                    'speed'         => $speed,
+                    'eta_minutes'   => $estimatedEta,
+                    'crowd_status'  => $crowdStatus,
                     'congestion'    => $trip->current_status ?? 'green',
+                    'last_updated'  => $latestLocation->created_at->toIso8601String(),
                 ];
-            });
+            })
+            ->filter()   // Buang entry null (angkot tanpa lokasi)
+            ->values();  // Re-index array agar JSON tidak jadi object
 
             return response()->json($data);
 
@@ -108,8 +132,20 @@ class TripController extends Controller
             Log::error("Get Active Angkots Error: " . $e->getMessage());
             return response()->json([
                 'message' => 'Internal Server Error',
-                'debug' => $e->getMessage()
+                'debug'   => env('APP_DEBUG') ? $e->getMessage() : 'Hubungi administrator.',
             ], 500);
+        }
+    }
+
+    public function endTrip(Request $request, $id)
+    {
+        try {
+            $trip = Trip::findOrFail($id);
+            $trip->update(['status' => 'finished']); // ← ganti 'ended' jadi 'finished'
+            return response()->json(['message' => 'Trip selesai.']);
+        } catch (\Exception $e) {
+            Log::error("End Trip Error: " . $e->getMessage());
+            return response()->json(['message' => 'Gagal mengakhiri trip.'], 500);
         }
     }
 }

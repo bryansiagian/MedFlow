@@ -23,6 +23,7 @@ Route::get('/weather/current', [WeatherController::class, 'getCurrentWeather']);
 Route::get('/driver/insights', [DriverController::class, 'getDashboardInsights']);
 Route::post('/register-driver', [AuthController::class, 'registerDriver']);
 Route::post('/verify-otp', [AuthController::class, 'verifyOtp']);
+Route::get('/trips/active', [TripController::class, 'getActiveAngkots']);
 
 // Protected Routes
 Route::middleware('auth:sanctum')->group(function () {
@@ -31,7 +32,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Trip Routes
     Route::post('/trips/start', [TripController::class, 'startTrip']);
     Route::post('/trips/{id}/location', [TripController::class, 'updateLocation']);
-    Route::get('/trips/active', [TripController::class, 'getActiveAngkots']);
+    Route::post('/trips/{id}/end',        [TripController::class, 'endTrip']);
 
     Route::get('/admin/stats', [AdminController::class, 'getDashboardStats']);
     Route::get('/admin/drivers', [DriverManagementController::class, 'index']);

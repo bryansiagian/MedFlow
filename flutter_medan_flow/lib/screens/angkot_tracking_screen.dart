@@ -96,26 +96,30 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
       desiredAccuracy: LocationAccuracy.high
     );
 
-    if (mounted) {
-      setState(() {
-        _initialCameraCenter = LatLng(position.latitude, position.longitude);
-      });
-      // Gerakkan peta ke lokasi user saat ini secara otomatis
-      _mapController.move(_initialCameraCenter, 14.0);
-    }
+    if (!mounted) return;
+    setState(() {
+      _initialCameraCenter = LatLng(position.latitude, position.longitude);
+    });
+
+    // Tunggu frame selesai render sebelum move camera
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _mapController.move(_initialCameraCenter, 14.0);
+    });
   }
 
   // ── Logika Pengambilan Data Angkot ────────────────────────────────────────
   Future<void> _fetchData() async {
     try {
       final data = await _apiService.getActiveAngkots();
-      if (mounted) {
-        setState(() {
-          _angkotList = data;
-          _updateMarkers(data);
-          _isLoading = false;
-        });
-      }
+      if (!mounted) return;
+      
+      final newMarkers = _buildMarkers(data); // Bangun marker dulu, tanpa setState
+      
+      setState(() {
+        _angkotList = data;
+        _markers = newMarkers; // Set semua sekaligus, 1x setState
+        _isLoading = false;
+      });
     } catch (e) {
       debugPrint('Tracking Error: $e');
       if (mounted) setState(() => _isLoading = false);
@@ -123,7 +127,7 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
   }
 
   // ── Pembuatan Marker Berwarna Dinamis ──────────────────────────────────────
-  void _updateMarkers(List<dynamic> data) {
+  List<Marker> _buildMarkers(List<dynamic> data) {
     final newMarkers = <Marker>[];
     for (final angkot in data) {
       final isFull = angkot['crowd_status'] == 'Penuh';
@@ -182,6 +186,7 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
       );
     }
     setState(() => _markers = newMarkers);
+    return newMarkers;
   }
 
   void _focusOnAngkot(dynamic angkot) {

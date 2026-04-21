@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
-import 'package:geolocator/geolocator.dart'; // ← TAMBAHAN
+import 'package:geolocator/geolocator.dart';
 import '../services/api_service.dart';
 
 // ─────────────────────────────────────────────
@@ -22,6 +22,7 @@ class _P {
   static const bg = Color(0xFFEEF4FF);
   static const card = Colors.white;
   static const ink = Color(0xFF0F172A);
+  static const ink2 = Color.fromARGB(255, 120, 147, 185);
   static const ink3 = Color(0xFF64748B);
   static const ink4 = Color(0xFF94A3B8);
   static const dark = Color(0xFF0F2878);
@@ -37,18 +38,20 @@ class TrafficHeatmapScreen extends StatefulWidget {
 class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
   final MapController _mapController = MapController();
   double _predictionMinutes = 5.0;
-  List<CircleMarker> _circles = [];
-  bool _isLoading = false;
 
-  Position? _userPosition; // ← TAMBAHAN
+  // Data State
+  List<Polyline> _aiPolylines = [];
+  bool _isLoading = false;
+  String _aiPrediction = '';
+  Position? _userPosition;
 
   @override
   void initState() {
     super.initState();
-    _determinePosition(); // ← GANTI: dulu langsung _fetchHeatmapData()
+    _determinePosition();
   }
 
-  // ── TAMBAHAN: Ambil GPS dulu, baru fetch data ────────────────
+  // ── Fungsi Mendeteksi Lokasi GPS Asli ────────────────────────
   Future<void> _determinePosition() async {
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
@@ -60,154 +63,147 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      setState(() {
-        _userPosition = position;
-        // Peta otomatis pindah ke lokasi GPS asli pengguna
-        _mapController.move(
-          LatLng(position.latitude, position.longitude),
-          14,
-        );
-      });
+      if (mounted) {
+        setState(() {
+          _userPosition = position;
+          _mapController.move(
+            LatLng(position.latitude, position.longitude),
+            14,
+          );
+        });
+      }
     }
-
-    // Tetap fetch data meski GPS ditolak
     _fetchHeatmapData();
   }
 
-  // ── Logic Data (Integrasi Backend) ──────────────────────────
+  // ── Ambil Data Hybrid dari Backend ──────────────────────────
   Future<void> _fetchHeatmapData() async {
+    if (!mounted) return;
     setState(() => _isLoading = true);
+
     try {
-      // ← MODIFIKASI: tambahkan lat & lng jika GPS tersedia
       String url =
           "${ApiService().baseUrl}/traffic-heatmap?minutes=${_predictionMinutes.toInt()}";
       if (_userPosition != null) {
-        url += "&lat=${_userPosition!.latitude}&lng=${_userPosition!.longitude}";
+        url +=
+            "&lat=${_userPosition!.latitude}&lng=${_userPosition!.longitude}";
       }
 
       final response = await http.get(Uri.parse(url));
       if (response.statusCode == 200) {
-        final List data = jsonDecode(response.body)['data'];
-        _generateCircles(data);
+        final body = jsonDecode(response.body);
+        final List data = body['data'] ?? [];
+
+        if (mounted) {
+          setState(() {
+            _aiPrediction = body['ai_prediction'] ?? '';
+            _generateAiPolylines(data);
+          });
+        }
       }
     } catch (e) {
-      debugPrint("Heatmap Error: $e");
+      debugPrint("Heatmap Logic Error: $e");
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void _generateCircles(List data) {
-    List<CircleMarker> newCircles = [];
+  void _generateAiPolylines(List data) {
+    List<Polyline> newPolylines = [];
+
     for (var item in data) {
-      Color circleColor;
-      if (item['congestion_level'] == 'macet') {
-        circleColor = Colors.red.withOpacity(0.5);
-      } else if (item['congestion_level'] == 'padat') {
-        circleColor = Colors.orange.withOpacity(0.5);
-      } else {
-        circleColor = Colors.green.withOpacity(0.4);
+      if (item['geometry'] == null || (item['geometry'] as List).isEmpty)
+        continue;
+
+      List<LatLng> points = (item['geometry'] as List).map((coord) {
+        return LatLng(
+          (coord[1] as num).toDouble(),
+          (coord[0] as num).toDouble(),
+        );
+      }).toList();
+
+      Color roadColor;
+      switch (item['congestion_level']) {
+        case 'sangat_macet':
+          roadColor = const Color(0xFF7B0000);
+          break;
+        case 'macet':
+          roadColor = Colors.red;
+          break;
+        case 'padat':
+          roadColor = Colors.orange;
+          break;
+        default:
+          roadColor = Colors.green;
       }
-      newCircles.add(
-        CircleMarker(
-          point: LatLng(
-            double.parse(item['lat'].toString()),
-            double.parse(item['lng'].toString()),
-          ),
-          radius: double.parse(item['radius'].toString()),
-          useRadiusInMeter: true,
-          color: circleColor,
-          borderStrokeWidth: 0,
+
+      newPolylines.add(
+        Polyline(
+          points: points,
+          color: roadColor.withOpacity(0.85),
+          strokeWidth: 6.5, // Dipertebal agar lebih mempesona
+          borderColor: Colors.white.withOpacity(0.4),
+          borderStrokeWidth: 1.5,
         ),
       );
     }
-    setState(() => _circles = newCircles);
+    setState(() {
+      _aiPolylines = newPolylines;
+    });
   }
 
   void _zoomIn() => _mapController.move(
-        _mapController.camera.center,
-        _mapController.camera.zoom + 1,
-      );
-
+    _mapController.camera.center,
+    _mapController.camera.zoom + 1,
+  );
   void _zoomOut() => _mapController.move(
-        _mapController.camera.center,
-        _mapController.camera.zoom - 1,
-      );
+    _mapController.camera.center,
+    _mapController.camera.zoom - 1,
+  );
 
-  // ════════════════════════════════════════════════════════════
-  //  BUILD
-  // ════════════════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     final topPad = MediaQuery.of(context).padding.top;
+    bool isPredicting = _predictionMinutes > 5;
 
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: Stack(
         children: [
-          // ── 1. Peta ─────────────────────────────────────────
+          // ── 1. PETA DINAMIS (TETAP BERWARNA) ────────────────
           FlutterMap(
             mapController: _mapController,
             options: const MapOptions(
               initialCenter: LatLng(3.5952, 98.6722),
-              initialZoom: 13,
+              initialZoom: 14,
             ),
             children: [
+              // MENGGUNAKAN STYLE STREETS AGAR TIDAK ABU-ABU
               TileLayer(
-                urlTemplate:
-                    'https://api.mapbox.com/styles/v1/${ApiService.mapboxTrafficStyle}/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}',
+                urlTemplate: isPredicting
+                    ? 'https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}'
+                    : 'https://api.mapbox.com/styles/v1/${ApiService.mapboxTrafficStyle}/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}',
                 additionalOptions: const {
                   'accessToken': ApiService.mapboxToken,
-                  'id': ApiService.mapboxTrafficStyle,
                 },
                 userAgentPackageName: 'com.medanflow.app',
               ),
-              CircleLayer(circles: _circles),
 
-              // ← TAMBAHAN: Marker lokasi pengguna
-              if (_userPosition != null)
-                MarkerLayer(
-                  markers: [
-                    Marker(
-                      point: LatLng(
-                        _userPosition!.latitude,
-                        _userPosition!.longitude,
-                      ),
-                      width: 44,
-                      height: 44,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: _P.b600,
-                          boxShadow: [
-                            BoxShadow(
-                              color: _P.b600.withOpacity(0.4),
-                              blurRadius: 10,
-                            ),
-                          ],
-                        ),
-                        child: const Icon(
-                          Icons.my_location_rounded,
-                          color: Colors.white,
-                          size: 22,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+              // Garis Jalan AI
+              if (isPredicting) PolylineLayer(polylines: _aiPolylines),
             ],
           ),
 
-          // ── 2. Header ────────────────────────────────────────
+          // ── 2. Header (Floating glass) ───────────────────────
           Positioned(
             top: topPad + 12,
             left: 20,
             right: 20,
-            child: _buildHeader(),
+            child: _buildHeader(isPredicting),
           ),
 
           // ── 3. Legend ────────────────────────────────────────
-          Positioned(top: topPad + 80, left: 20, child: _buildLegend()),
+          Positioned(top: topPad + 85, left: 20, child: _buildLegend()),
 
           // ── 4. Zoom Controls ──────────────────────────────────
           Positioned(
@@ -237,9 +233,9 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
     );
   }
 
-  // Semua widget builder di bawah ini tidak ada perubahan ──────
+  // ── Widget Helper UI ─────────────────────────────────────────
 
-  Widget _buildHeader() {
+  Widget _buildHeader(bool isPredicting) {
     return Container(
       padding: const EdgeInsets.fromLTRB(8, 8, 12, 8),
       decoration: BoxDecoration(
@@ -292,9 +288,11 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                     ),
                   ),
                 ),
-                const Text(
-                  'Heatmap real-time Kota Medan',
-                  style: TextStyle(
+                Text(
+                  isPredicting
+                      ? 'Visualisasi Kecerdasan Buatan'
+                      : 'Heatmap real-time Kota Medan',
+                  style: const TextStyle(
                     fontSize: 10.5,
                     color: _P.ink3,
                     fontWeight: FontWeight.w600,
@@ -309,11 +307,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
               width: 38,
               height: 38,
               decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [_P.b500, _P.b700],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
+                gradient: const LinearGradient(colors: [_P.b500, _P.b700]),
                 borderRadius: BorderRadius.circular(12),
                 boxShadow: [
                   BoxShadow(
@@ -342,19 +336,12 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
         color: Colors.white.withOpacity(0.92),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: _P.b100, width: 1.5),
-        boxShadow: [
-          BoxShadow(
-            color: _P.b500.withOpacity(0.10),
-            blurRadius: 14,
-            offset: const Offset(0, 3),
-          ),
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'LEGENDA',
+            'INFORMASI',
             style: TextStyle(
               fontSize: 8.5,
               fontWeight: FontWeight.w800,
@@ -363,6 +350,8 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
             ),
           ),
           const SizedBox(height: 7),
+          _legendItem(const Color(0xFF7B0000), 'Sangat Macet'),
+          const SizedBox(height: 5),
           _legendItem(Colors.red, 'Macet Parah'),
           const SizedBox(height: 5),
           _legendItem(Colors.orange, 'Padat Merayap'),
@@ -383,9 +372,6 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
           decoration: BoxDecoration(
             color: color.withOpacity(0.85),
             shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(color: color.withOpacity(0.40), blurRadius: 4),
-            ],
           ),
         ),
         const SizedBox(width: 7),
@@ -438,11 +424,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [_P.b600, _P.b800],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
+        gradient: const LinearGradient(colors: [_P.b600, _P.b800]),
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
@@ -465,7 +447,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
           ),
           SizedBox(width: 9),
           Text(
-            'Menganalisis data...',
+            'AI Menganalisis...',
             style: TextStyle(
               color: Colors.white,
               fontSize: 12,
@@ -490,11 +472,6 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
             blurRadius: 28,
             offset: const Offset(0, 8),
           ),
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
         ],
       ),
       child: Column(
@@ -511,9 +488,9 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                   border: Border.all(color: _P.b100, width: 1.5),
                 ),
                 child: const Icon(
-                  Icons.show_chart_rounded,
+                  Icons.psychology_rounded,
                   color: _P.b600,
-                  size: 20,
+                  size: 24,
                 ),
               ),
               const SizedBox(width: 12),
@@ -522,7 +499,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Prediksi Trafik',
+                      'Analisis Masa Depan',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w900,
@@ -530,9 +507,9 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                       ),
                     ),
                     Text(
-                      'Berbasis AI & Data Historis',
+                      'Berdasarkan Google Gemini 2.0 Flash',
                       style: TextStyle(
-                        fontSize: 11,
+                        fontSize: 10,
                         color: _P.ink3,
                         fontWeight: FontWeight.w600,
                       ),
@@ -546,19 +523,8 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                   vertical: 7,
                 ),
                 decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [_P.b500, _P.b700],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
+                  gradient: const LinearGradient(colors: [_P.b500, _P.b700]),
                   borderRadius: BorderRadius.circular(14),
-                  boxShadow: [
-                    BoxShadow(
-                      color: _P.b600.withOpacity(0.28),
-                      blurRadius: 10,
-                      offset: const Offset(0, 3),
-                    ),
-                  ],
                 ),
                 child: Text(
                   '+${_predictionMinutes.toInt()} Mnt',
@@ -572,50 +538,39 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
             ],
           ),
           const SizedBox(height: 14),
-          Container(height: 1, color: _P.b100),
-          const SizedBox(height: 10),
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              activeTrackColor: _P.b500,
-              inactiveTrackColor: _P.b100,
-              thumbColor: _P.b600,
-              overlayColor: _P.b500.withOpacity(0.15),
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-              trackHeight: 5,
-            ),
-            child: Slider(
-              value: _predictionMinutes,
-              min: 5,
-              max: 30,
-              divisions: 5,
-              onChanged: (v) => setState(() => _predictionMinutes = v),
-              onChangeEnd: (_) => _fetchHeatmapData(),
-            ),
+          Slider(
+            value: _predictionMinutes,
+            min: 5,
+            max: 30,
+            divisions: 5,
+            activeColor: _P.b600,
+            onChanged: (v) => setState(() => _predictionMinutes = v),
+            onChangeEnd: (_) => _fetchHeatmapData(),
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 4),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          if (_aiPrediction.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Container(height: 1, color: _P.b100),
+            const SizedBox(height: 12),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Sekarang',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: _P.ink4,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                Text(
-                  '30 Mnt Ke Depan',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: _P.ink4,
-                    fontWeight: FontWeight.w700,
+                const Icon(Icons.auto_awesome, color: Colors.amber, size: 16),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _aiPrediction,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: _P.ink,
+                      fontWeight: FontWeight.w500,
+                      height: 1.5,
+                      fontStyle: FontStyle.italic,
+                    ),
                   ),
                 ),
               ],
             ),
-          ),
+          ],
         ],
       ),
     );

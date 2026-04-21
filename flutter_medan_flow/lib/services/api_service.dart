@@ -1,4 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config.dart';
@@ -47,6 +50,20 @@ class ApiService {
       print("Server Error: ${response.body}");
       throw Exception('Gagal memulai perjalanan');
     }
+  }
+
+  // ================= END TRIP =================
+  Future<void> endTrip(int tripId) async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    String? token = prefs.getString('token');
+
+    await http.post(
+      Uri.parse('$baseUrl/trips/$tripId/end'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Accept': 'application/json',
+      },
+    );
   }
 
   // ================= UPDATE LOCATION =================
@@ -99,22 +116,31 @@ class ApiService {
     double destLat,
     double destLng,
   ) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/predictions/travel-time'),
-      headers: {'Accept': 'application/json'},
-      body: {
-        'origin_lat': oriLat.toString(),
-        'origin_lng': oriLng.toString(),
-        'dest_lat': destLat.toString(),
-        'dest_lng': destLng.toString(),
-      },
-    );
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/predictions/travel-time'),
+            headers: {'Accept': 'application/json'},
+            body: {
+              'origin_lat': oriLat.toString(),
+              'origin_lng': oriLng.toString(),
+              'dest_lat': destLat.toString(),
+              'dest_lng': destLng.toString(),
+            },
+          )
+          .timeout(const Duration(seconds: 15));
 
-    if (response.statusCode == 200) {
-      return jsonDecode(response.body);
-    } else {
-      print("Error Prediksi: ${response.body}");
-      throw Exception('Gagal mengambil prediksi');
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+
+      // Log body asli untuk debug, lalu throw pesan yang ramah
+      debugPrint('Error Prediksi [${response.statusCode}]: ${response.body}');
+      throw Exception('Server error ${response.statusCode}');
+    } on TimeoutException {
+      throw Exception('Koneksi timeout — coba lagi');
+    } on SocketException {
+      throw Exception('Tidak ada koneksi internet');
     }
   }
 

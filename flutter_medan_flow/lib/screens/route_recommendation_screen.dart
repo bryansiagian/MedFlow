@@ -41,6 +41,8 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
   final MapController _mapController = MapController();
   List _recommendations = [];
   bool _isLoading = false;
+  Map<String, Map<String, double>> _mapboxCoords = {};
+  Timer? _debounce;
 
   final TextEditingController _originController = TextEditingController(
     text: "Mendeteksi lokasi...",
@@ -74,6 +76,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
   Position? _userPosition;
   List<LatLng> _currentPolyline = [];
   int? _selectedRouteIndex;
+  
 
   @override
   void initState() {
@@ -88,6 +91,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _originController.dispose();
     _destController.dispose();
     _destFocusNode.dispose();
@@ -120,6 +124,56 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     }
   }
 
+  Future<void> _searchMapbox(String query) async {
+    if (query.length < 2) return;
+    final encodedQuery = Uri.encodeComponent(query);
+
+    // Ganti ke Search Box API — lebih pintar, support bahasa lokal
+    final uri = Uri.parse(
+      "https://api.mapbox.com/search/searchbox/v1/suggest"
+    ).replace(queryParameters: {
+      'q': query,
+      'proximity': '98.6722,3.5952',
+      'bbox': '98.3,3.0,99.2,4.3',
+      'language': 'id',
+      'limit': '6',
+      'session_token': 'medan-flow-session',
+      'access_token': AppConfig.mapboxToken,
+    });
+
+    debugPrint("🔍 Search URL: $uri");
+
+    try {
+      final res = await http.get(uri);
+      debugPrint("📡 Status: ${res.statusCode}");
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final suggestions = data['suggestions'] as List;
+        debugPrint("✅ Results: ${suggestions.length}");
+
+        setState(() {
+          _filteredSuggestions = suggestions
+              .map((s) => s['name'] + (s['place_formatted'] != null ? ', ${s['place_formatted']}' : ''))
+              .cast<String>()
+              .toList();
+          _mapboxCoords = {
+            ..._mapboxCoords,
+            for (var s in suggestions)
+              if (s['geometry'] != null)
+                (s['name'] + (s['place_formatted'] != null ? ', ${s['place_formatted']}' : '')): {
+                  'lat': (s['geometry']['coordinates'][1] as num).toDouble(),
+                  'lng': (s['geometry']['coordinates'][0] as num).toDouble(),
+                }
+          };
+          _showSuggestions = _filteredSuggestions.isNotEmpty;
+        });
+      }
+    } catch (e) {
+      debugPrint("❌ Error: $e");
+    }
+  }
+
   void _onDestChanged(String value) {
     if (value.trim().isEmpty) {
       setState(() {
@@ -128,13 +182,11 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
       });
       return;
     }
-    final filtered = _popularDestinations
-        .where((d) => d.toLowerCase().contains(value.toLowerCase()))
-        .take(6)
-        .toList();
-    setState(() {
-      _filteredSuggestions = filtered;
-      _showSuggestions = filtered.isNotEmpty;
+
+    // Debounce 500ms — hemat API call
+    if (_debounce?.isActive ?? false) _debounce!.cancel();
+    _debounce = Timer(const Duration(milliseconds: 500), () {
+      _searchMapbox(value);
     });
   }
 
@@ -160,9 +212,9 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
   Future<void> _fetchSmartRoutes() async {
     final dest = _destController.text.trim();
     if (dest.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("Pilih tujuan dulu")));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Pilih tujuan dulu")),
+      );
       return;
     }
 
@@ -173,12 +225,20 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     });
 
     try {
-      // Step 1: Panggil Laravel untuk ambil data rute dari Sydney RDS
+      // Ambil koordinat tujuan dari Mapbox Geocoding
+      final coords = _mapboxCoords[dest];
+
+      // Step 1: Panggil Laravel dengan koordinat tujuan dari Mapbox
       final queryParams = <String, String>{'dest': dest};
       if (_userPosition != null) {
         queryParams['lat'] = _userPosition!.latitude.toString();
         queryParams['lng'] = _userPosition!.longitude.toString();
       }
+      if (coords != null) {
+        queryParams['dest_lat'] = coords['lat'].toString();
+        queryParams['dest_lng'] = coords['lng'].toString();
+      }
+
       final uri = Uri.parse(
         "${AppConfig.baseUrl}/recommendations",
       ).replace(queryParameters: queryParams);
@@ -187,7 +247,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
 
-        // Step 2: Ambil rute jalan meliuk (Geometry) langsung dari Mapbox API (Bypass AWS Proxy)
+        // Step 2: Ambil rute jalan meliuk (Geometry) langsung dari Mapbox API
         if (_userPosition != null && data.isNotEmpty) {
           final dLat = (data[0]['dest_lat'] as num).toDouble();
           final dLng = (data[0]['dest_lng'] as num).toDouble();
@@ -213,9 +273,21 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
         if (_recommendations.isNotEmpty) {
           _drawRoute(_recommendations[0]['geometry'], index: 0);
         }
+      } else {
+        debugPrint("Laravel error: ${response.statusCode} ${response.body}");
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Gagal mengambil data rute")),
+          );
+        }
       }
     } catch (e) {
       debugPrint("Analysis Error: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Terjadi kesalahan koneksi")),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -255,6 +327,21 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     });
     if (points.isNotEmpty)
       _mapController.move(points[points.length ~/ 2], 12.0);
+  }
+
+    String _formatEta(String etaStr) {
+    final menit = int.tryParse(etaStr.split(" ")[0]) ?? 0;
+    if (menit < 60) return '$menit';
+    final jam = menit ~/ 60;
+    final sisa = menit % 60;
+    return sisa == 0 ? '$jam' : '$jam Jam\n$sisa';
+  }
+
+  String _labelEta(String etaStr) {
+    final menit = int.tryParse(etaStr.split(" ")[0]) ?? 0;
+    if (menit < 60) return 'MENIT';
+    final sisa = menit % 60;
+    return sisa == 0 ? 'JAM' : 'MENIT';
   }
 
   @override
@@ -626,26 +713,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                     : const LinearGradient(colors: [_P.b50, _P.b100]),
                 borderRadius: BorderRadius.circular(16),
               ),
-              child: Column(
-                children: [
-                  Text(
-                    item['eta'].split(" ")[0],
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w900,
-                      color: isSelected ? Colors.white : _P.b600,
-                    ),
-                  ),
-                  Text(
-                    'MENIT',
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                      color: isSelected ? Colors.white70 : _P.ink4,
-                    ),
-                  ),
-                ],
-              ),
+              child: _buildEtaBadge(item['eta'], isSelected),
             ),
             const SizedBox(width: 20),
             Expanded(
@@ -674,6 +742,51 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildEtaBadge(String etaStr, bool isSelected) {
+    final menit = int.tryParse(etaStr.split(" ")[0]) ?? 0;
+    final color = isSelected ? Colors.white : _P.b600;
+    final subColor = isSelected ? Colors.white70 : _P.ink4;
+
+    if (menit < 60) {
+      return Column(
+        children: [
+          Text('$menit', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
+          Text('MENIT', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: subColor)),
+        ],
+      );
+    }
+
+    final jam = menit ~/ 60;
+    final sisa = menit % 60;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            Text('$jam', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
+            const SizedBox(width: 2),
+            Text('Jam', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subColor)),
+          ],
+        ),
+        if (sisa > 0)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text('$sisa', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
+              const SizedBox(width: 2),
+              Text('Min', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subColor)),
+            ],
+          ),
+      ],
     );
   }
 }
