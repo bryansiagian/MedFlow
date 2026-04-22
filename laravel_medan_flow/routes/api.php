@@ -12,6 +12,26 @@ use App\Http\Controllers\Api\DriverController;
 use Illuminate\Support\Facades\Route;
 
 // Public Routes
+
+Route::get('/debug-trips', function () {
+    try {
+        $count = \DB::table('trips')->where('status', 'active')->count();
+        return response()->json([
+            'status' => 'ok',
+            'db_host' => env('DB_HOST'),
+            'db_name' => env('DB_DATABASE'),
+            'active_trips' => $count,
+            'app_env' => env('APP_ENV'),
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'status' => 'error',
+            'message' => $e->getMessage(),
+            'class' => get_class($e),
+        ], 500);
+    }
+});
+
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
 Route::get('/recommendations', [RecommendationController::class, 'getRecommendations']);
