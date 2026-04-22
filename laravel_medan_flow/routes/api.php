@@ -15,7 +15,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/debug-trips', function () {
     try {
-        $count = \DB::table('trips')->where('status', 'active')->count();
+        $count = \DB::table('trips')->where('status', 'ongoing')->count();
         return response()->json([
             'status' => 'ok',
             'db_host' => env('DB_HOST'),
