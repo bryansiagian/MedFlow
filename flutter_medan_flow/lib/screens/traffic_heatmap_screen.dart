@@ -507,7 +507,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                       ),
                     ),
                     Text(
-                      'Berdasarkan Google Gemini 2.0 Flash',
+                      'AI Based',
                       style: TextStyle(
                         fontSize: 10,
                         color: _P.ink3,
