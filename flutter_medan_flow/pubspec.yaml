@@ -1,6 +1,6 @@
 name: flutter_medan_flow
 description: "A new Flutter project."
-publish_to: 'none'
+publish_to: "none"
 
 version: 1.0.0+1
 
@@ -15,9 +15,8 @@ dependencies:
   provider: ^6.1.1
   shared_preferences: ^2.3.0
   geolocator: ^10.1.0
-  flutter_map: ^6.1.0
-  latlong2: ^0.9.1
-  flutter_map_cancellable_tile_provider: ^2.0.0  # ← FIXED: was ^2.0.0
+  google_maps_flutter: ^2.5.0
+  flutter_polyline_points: ^2.0.0
 
 dev_dependencies:
   flutter_test:

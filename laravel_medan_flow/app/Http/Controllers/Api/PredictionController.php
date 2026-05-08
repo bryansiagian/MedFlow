@@ -3,205 +3,183 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\MLPredictionService;
+use App\Services\GeminiService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
 
 class PredictionController extends Controller
 {
+    private MLPredictionService $ml;
+    private GeminiService $gemini;
 
+    public function __construct(MLPredictionService $ml, GeminiService $gemini)
+    {
+        $this->ml     = $ml;
+        $this->gemini = $gemini;
+    }
+
+    /**
+     * POST /api/predict/travel-time
+     *
+     * Body: { origin_lat, origin_lng, dest_lat, dest_lng }
+     */
     public function getTravelTimePrediction(Request $request)
     {
         $request->validate([
-            'origin_lat' => 'required|numeric|between:-90,90',
-            'origin_lng' => 'required|numeric|between:-180,180',
-            'dest_lat'   => 'required|numeric|between:-90,90',
-            'dest_lng'   => 'required|numeric|between:-180,180',
+            'origin_lat' => 'required|numeric',
+            'origin_lng' => 'required|numeric',
+            'dest_lat'   => 'required|numeric',
+            'dest_lng'   => 'required|numeric',
         ]);
 
-        $oriLat  = (float) $request->origin_lat;
-        $oriLng  = (float) $request->origin_lng;
-        $destLat = (float) $request->dest_lat;
-        $destLng = (float) $request->dest_lng;
+        $originLat = (float) $request->origin_lat;
+        $originLng = (float) $request->origin_lng;
+        $destLat   = (float) $request->dest_lat;
+        $destLng   = (float) $request->dest_lng;
 
-        $mapboxToken    = env('MAPBOX_ACCESS_TOKEN');
-        $openweatherKey = env('OPENWEATHER_API_KEY');
-
-        // ── 1. Mapbox Directions API (dengan annotations=duration,congestion) ──
-        // annotations=congestion → per-segment congestion level (low/moderate/heavy/severe)
-        // overview=full          → full route geometry untuk polyline di Flutter
-        // access_token           → wajib ada
-        $mapboxUrl = "https://api.mapbox.com/directions/v5/mapbox/driving-traffic/"
-            . "{$oriLng},{$oriLat};{$destLng},{$destLat}"
-            . "?geometries=geojson"
-            . "&overview=full"
-            . "&annotations=duration,congestion"
-            . "&access_token={$mapboxToken}";
-
-        try {
-            $mapboxResponse = Http::timeout(10)->get($mapboxUrl);
-            $mapboxData     = $mapboxResponse->json();
-
-            if ($mapboxResponse->failed() || empty($mapboxData['routes'])) {
-                return response()->json([
-                    'error' => 'Mapbox gagal menghitung rute. Periksa token atau koordinat.'
-                ], 500);
-            }
-        } catch (\Exception $e) {
-            return response()->json(['error' => 'Koneksi ke Mapbox gagal: ' . $e->getMessage()], 500);
+        // ── 1. Ambil rute dari OSRM ──────────────────────────
+        $osrmData = $this->fetchOSRMRoute($originLat, $originLng, $destLat, $destLng);
+        if (!$osrmData) {
+            return response()->json(['error' => 'Gagal mengambil data rute.'], 500);
         }
 
-        $route         = $mapboxData['routes'][0];
-        $distanceKm    = $route['distance'] / 1000;
+        $distanceKm      = round($osrmData['distance'] / 1000, 1);
+        $durationNormal  = (int) ($osrmData['duration'] / 60); // menit
+        $encodedPolyline = $osrmData['encoded_polyline'];
 
-        // Mapbox driving-traffic sudah memperhitungkan real-time traffic
-        // duration = waktu dengan traffic saat ini
-        // duration_typical = waktu normal tanpa gangguan (jika tersedia)
-        $predictedSeconds = $route['duration'];
-        $normalSeconds    = $route['duration_typical'] ?? $route['duration'];
-        $routeGeometry    = $route['geometry']['coordinates'] ?? [];
+        // ── 2. Ambil cuaca dari OpenWeatherMap ───────────────
+        $weather     = $this->fetchWeatherCondition($originLat, $originLng);
+        $weatherMain = strtolower($weather['main'] ?? 'clear');
 
-        // Ambil congestion dominan dari annotations per-leg
-        $congestionAnnotations = $route['legs'][0]['annotation']['congestion'] ?? [];
-        $dominantCongestion    = $this->getDominantCongestion($congestionAnnotations);
+        // ── 3. Prediksi ML ───────────────────────────────────
+        $mlResult   = $this->ml->predict($originLat, $originLng, $destLat, $destLng, $weatherMain);
+        $multiplier = $mlResult['travel_multiplier'];
 
-        // ── 2. OpenWeatherMap — cuaca aktual di titik asal ───────────
-        $weatherLabel  = 'Cerah';
-        $weatherFactor = 0.0; // multiplier tambahan di atas data Mapbox
-        $isRaining     = false;
+        // ── 4. Hitung estimasi waktu ─────────────────────────
+        $predictedMinutes = (int) round($durationNormal * $multiplier);
+        $delayMinutes     = max(0, $predictedMinutes - $durationNormal);
 
-        try {
-            $weatherResponse = Http::timeout(5)->get(
-                'https://api.openweathermap.org/data/2.5/weather',
-                [
-                    'lat'   => $oriLat,
-                    'lon'   => $oriLng,
-                    'appid' => $openweatherKey,
-                    'units' => 'metric',
-                    'lang'  => 'id',
-                ]
-            );
+        $predictedTime = $this->formatDuration($predictedMinutes);
+        $normalTime    = $this->formatDuration($durationNormal);
+        $delayText     = $delayMinutes > 0 ? "+{$delayMinutes} menit" : 'Tidak ada';
 
-            if ($weatherResponse->ok()) {
-                $wData       = $weatherResponse->json();
-                $weatherId   = $wData['weather'][0]['id'] ?? 800;
-                $description = $wData['weather'][0]['description'] ?? 'cerah';
-                $windspeed   = $wData['wind']['speed'] ?? 0; // m/s
-                $visibility  = $wData['visibility'] ?? 10000; // meter
-
-                // OpenWeatherMap weather condition codes:
-                // 2xx = Thunderstorm, 3xx = Drizzle, 5xx = Rain, 6xx = Snow, 7xx = Atmosphere, 8xx = Clear/Clouds
-                if ($weatherId >= 200 && $weatherId < 300) {
-                    // Badai petir
-                    $isRaining     = true;
-                    $weatherFactor = 0.30;
-                    $weatherLabel  = 'Badai Petir — Kecepatan sangat berkurang';
-                } elseif ($weatherId >= 300 && $weatherId < 400) {
-                    // Gerimis
-                    $isRaining     = true;
-                    $weatherFactor = 0.10;
-                    $weatherLabel  = 'Gerimis — ' . ucfirst($description);
-                } elseif ($weatherId >= 500 && $weatherId < 600) {
-                    // Hujan
-                    $isRaining     = true;
-                    $weatherFactor = $weatherId >= 502 ? 0.25 : 0.15; // heavy vs light
-                    $weatherLabel  = 'Hujan — ' . ucfirst($description);
-                } elseif ($weatherId >= 700 && $weatherId < 800) {
-                    // Kabut/asap/haze — sering terjadi di Sumatera
-                    $weatherFactor = $visibility < 1000 ? 0.20 : 0.05;
-                    $weatherLabel  = 'Jarak Pandang Terbatas — ' . ucfirst($description);
-                } elseif ($windspeed > 10) {
-                    // Angin kencang (>36 km/h)
-                    $weatherFactor = 0.05;
-                    $weatherLabel  = 'Angin Kencang ' . round($windspeed * 3.6) . ' km/h';
-                } else {
-                    $weatherLabel = ucfirst($description);
-                }
-            }
-        } catch (\Exception $e) {
-            $weatherLabel = 'Data cuaca tidak tersedia';
-        }
-
-        // ── 3. Hitung delay & status akhir ───────────────────────────
-        // Base sudah dari Mapbox traffic, weather factor sebagai koreksi tambahan
-        $finalPredictedSeconds = $predictedSeconds * (1 + $weatherFactor);
-        $delaySeconds          = max(0, $finalPredictedSeconds - $normalSeconds);
-
-        // Status & warna: prioritaskan data congestion dari Mapbox
-        [$status, $color] = $this->resolveStatusFromCongestion(
-            $dominantCongestion,
-            $isRaining
-        );
-
-        // ── 4. Confidence dinamis ─────────────────────────────────────
-        $now        = Carbon::now('Asia/Jakarta');
-        $isWeekend  = $now->isWeekend();
-        $hour       = $now->hour;
-        $isPeakHour = !$isWeekend && (($hour >= 7 && $hour <= 9) || ($hour >= 16 && $hour <= 19));
-
-        $confidence = 90; // Mapbox traffic sudah cukup akurat sebagai base
-        if ($isPeakHour)          $confidence -= 8;  // traffic peak = fluktuatif
-        if ($isRaining)           $confidence -= 6;
-        if ($weatherFactor >= 0.25) $confidence -= 5; // cuaca ekstrem
-        if ($distanceKm > 25)     $confidence -= 4;
-        $confidence = max(65, min(95, $confidence));
-
+        // ── 5. Build response ────────────────────────────────
         return response()->json([
-            'route_name'         => 'Rute Tercepat (Mapbox Traffic)',
-            'distance'           => round($distanceKm, 1) . ' km',
-            'normal_time'        => $this->formatDuration($normalSeconds / 60),
-            'predicted_time'     => $this->formatDuration($finalPredictedSeconds / 60),
-            'delay'              => $delaySeconds > 60
-                                        ? '+' . $this->formatDuration($delaySeconds / 60)
-                                        : 'Tanpa delay berarti',
-            'congestion_level'   => $status,
-            'status_color'       => $color,
-            'current_time'       => $now->format('H:i'),
-            'route_geometry'     => $routeGeometry,
-            'prediction_factors' => [
-                'weather'          => $weatherLabel,
-                'traffic_source'   => 'Mapbox Real-time Traffic',
-                'confidence_level' => $confidence . '%',
-            ],
+            // Estimasi waktu
+            'predicted_time'   => $predictedTime,
+            'normal_time'      => $normalTime,
+            'delay'            => $delayText,
+            'distance'         => $distanceKm . ' km',
+
+            // ML result
+            'congestion_level' => $mlResult['congestion_level'],
+            'status_color'     => $mlResult['status_color'],
+            'travel_multiplier'=> $multiplier,
+
+            // Polyline rute
+            'encoded_polyline' => $encodedPolyline,
+
+            // Faktor prediksi (untuk UI)
+            'prediction_factors' => array_merge(
+                $mlResult['prediction_factors'],
+                [
+                    'weather'          => $weather['description'] ?? 'Tidak diketahui',
+                    'confidence_level' => $mlResult['confidence_level'],
+                    'traffic_source'   => $mlResult['traffic_source'],
+                ]
+            ),
+
+            // Debug info (hapus di production)
+            'ml_features' => $mlResult['ml_features'],
         ]);
     }
 
-    // ── Helper: tentukan congestion dominan dari array per-segment ──
-    private function getDominantCongestion(array $annotations): string
-    {
-        if (empty($annotations)) return 'unknown';
+    // ── OSRM: Ambil rute gratis tanpa API key ─────────────────────────────
 
-        $counts = array_count_values($annotations);
-        // Prioritas: severe > heavy > moderate > low
-        foreach (['severe', 'heavy', 'moderate', 'low'] as $level) {
-            if (isset($counts[$level]) && $counts[$level] > count($annotations) * 0.25) {
-                return $level;
+    private function fetchOSRMRoute(float $lat1, float $lng1, float $lat2, float $lng2): ?array
+    {
+        try {
+            $url = "https://router.project-osrm.org/route/v1/driving/{$lng1},{$lat1};{$lng2},{$lat2}";
+            $response = Http::timeout(10)->get($url, [
+                'overview'   => 'full',
+                'geometries' => 'polyline',
+                'steps'      => 'false',
+            ]);
+
+            if ($response->successful()) {
+                $data  = $response->json();
+                $route = $data['routes'][0] ?? null;
+                if (!$route) return null;
+
+                $distanceKm = $route['distance'] / 1000;
+                $duration   = $route['duration']; // detik dari OSRM
+
+                // ── Koreksi realistis untuk jalan Sumatera ──────
+                // OSRM terlalu optimis, tambah faktor berdasarkan jarak
+                if ($distanceKm > 100) {
+                    // Jarak jauh: jalan antar kota Sumatera, banyak tikungan
+                    // Asumsikan kecepatan rata-rata 55 km/h (lebih realistis)
+                    $duration = ($distanceKm / 55) * 3600;
+                } elseif ($distanceKm > 30) {
+                    // Jarak menengah: keluar kota
+                    $duration = ($distanceKm / 45) * 3600;
+                }
+                // Dalam kota (<30km): pakai durasi OSRM langsung
+
+                return [
+                    'distance'         => $route['distance'],
+                    'duration'         => $duration,
+                    'encoded_polyline' => $route['geometry'],
+                ];
             }
+
+            Log::error('OSRM failed: ' . $response->status());
+            return null;
+
+        } catch (\Exception $e) {
+            Log::error('OSRM Exception: ' . $e->getMessage());
+            return null;
         }
-        return array_key_first($counts) ?? 'low';
     }
 
-    // ── Helper: konversi congestion level Mapbox → status & warna app ──
-    private function resolveStatusFromCongestion(string $congestion, bool $isRaining): array
+    // ── OpenWeatherMap ────────────────────────────────────────────────────
+
+    private function fetchWeatherCondition(float $lat, float $lng): array
     {
-        return match ($congestion) {
-            'severe'   => ['Macet Parah',    'red'],
-            'heavy'    => ['Padat Merayap',  $isRaining ? 'red' : 'orange'],
-            'moderate' => ['Agak Padat',     $isRaining ? 'orange' : 'orange'],
-            'low'      => ['Lancar',         $isRaining ? 'orange' : 'green'],
-            default    => ['Lancar',         'green'],
-        };
+        try {
+            $apiKey   = env('OPENWEATHERMAP_API_KEY');
+            $response = Http::timeout(8)->get('https://api.openweathermap.org/data/2.5/weather', [
+                'lat'   => $lat,
+                'lon'   => $lng,
+                'appid' => $apiKey,
+                'lang'  => 'id',
+                'units' => 'metric',
+            ]);
+
+            if ($response->successful()) {
+                $data = $response->json();
+                return [
+                    'main'        => $data['weather'][0]['main'] ?? 'Clear',
+                    'description' => $data['weather'][0]['description'] ?? 'Cerah',
+                    'temp'        => $data['main']['temp'] ?? null,
+                ];
+            }
+        } catch (\Exception $e) {
+            Log::warning('Weather fetch failed: ' . $e->getMessage());
+        }
+
+        return ['main' => 'Clear', 'description' => 'Cerah'];
     }
 
-    // ── Helper: format menit → "X jam Y mnt" atau "Z menit" ──
-    private function formatDuration(float $minutes): string
+    // ── Format durasi menit → "X jam Y menit" ────────────────────────────
+
+    private function formatDuration(int $minutes): string
     {
-        $rounded = (int) round($minutes);
-        if ($rounded >= 60) {
-            $h = intdiv($rounded, 60);
-            $m = $rounded % 60;
-            return $m > 0 ? "{$h} jam {$m} mnt" : "{$h} jam";
-        }
-        return "{$rounded} menit";
+        if ($minutes < 60) return $minutes . ' menit';
+        $h = intdiv($minutes, 60);
+        $m = $minutes % 60;
+        return $m > 0 ? "{$h} jam {$m} menit" : "{$h} jam";
     }
 }

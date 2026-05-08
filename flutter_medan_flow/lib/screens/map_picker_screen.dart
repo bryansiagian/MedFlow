@@ -1,7 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 // ─────────────────────────────────────────────
 // Palette (same as all other screens)
@@ -34,7 +33,7 @@ class _MapPickerScreenState extends State<MapPickerScreen>
   // ── Data (unchanged) ─────────────────────────────────────────
   final LatLng _medanCenter = const LatLng(3.5952, 98.6722);
   late LatLng _currentCenter;
-  final MapController _mapController = MapController();
+  GoogleMapController? _mapController;
 
   // ── Animation ────────────────────────────────────────────────
   late AnimationController _pinCtrl;
@@ -65,23 +64,22 @@ class _MapPickerScreenState extends State<MapPickerScreen>
       body: Stack(
         children: [
           // 1. Peta full screen
-          FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _medanCenter,
-              initialZoom: 15.0,
-              onPositionChanged: (position, hasGesture) {
-                if (hasGesture) {
-                  setState(() => _currentCenter = position.center!);
-                }
-              },
+          GoogleMap(
+            initialCameraPosition: CameraPosition(
+              target: _medanCenter,
+              zoom: 15,
             ),
-            children: [
-              TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.example.flutter_medan_flow',
-              ),
-            ],
+            onMapCreated: (controller) {
+              _mapController = controller;
+            },
+            onCameraMove: (position) {
+              _currentCenter = position.target;
+            },
+            onCameraIdle: () {
+              setState(() {});
+            },
+            myLocationEnabled: true,
+            myLocationButtonEnabled: true,
           ),
 
           // 2. Header overlay

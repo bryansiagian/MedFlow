@@ -1,17 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../services/api_service.dart';
 
 // ─────────────────────────────────────────────
 // Palette (Konsisten dengan Tema Medan Flow)
 // ─────────────────────────────────────────────
 class _P {
-  static const b50 = Color(0xFFEFF6FF);
+  static const b50  = Color(0xFFEFF6FF);
   static const b100 = Color(0xFFDBEAFE);
   static const b300 = Color(0xFF93C5FD);
   static const b400 = Color(0xFF60A5FA);
@@ -19,9 +18,9 @@ class _P {
   static const b600 = Color(0xFF2563EB);
   static const b700 = Color(0xFF1D4ED8);
   static const b800 = Color(0xFF1E40AF);
-  static const bg = Color(0xFFEEF4FF);
+  static const bg   = Color(0xFFEEF4FF);
   static const card = Colors.white;
-  static const ink = Color(0xFF0F172A);
+  static const ink  = Color(0xFF0F172A);
   static const ink2 = Color.fromARGB(255, 120, 147, 185);
   static const ink3 = Color(0xFF64748B);
   static const ink4 = Color(0xFF94A3B8);
@@ -36,14 +35,21 @@ class TrafficHeatmapScreen extends StatefulWidget {
 }
 
 class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
-  final MapController _mapController = MapController();
-  double _predictionMinutes = 5.0;
+  // ── Google Maps ────────────────────────────────────────────────────────────
+  final Completer<GoogleMapController> _mapController = Completer();
 
-  // Data State
-  List<Polyline> _aiPolylines = [];
+  // Polylines AI digambar manual di atas Google Maps
+  // Google Maps pakai Set<Polyline>, bukan List<Polyline> flutter_map
+  Set<Polyline> _aiPolylines = {};
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  double _predictionMinutes = 5.0;
   bool _isLoading = false;
   String _aiPrediction = '';
   Position? _userPosition;
+
+  // Counter unik untuk PolylineId (harus unik per polyline)
+  int _polylineIdCounter = 0;
 
   @override
   void initState() {
@@ -51,7 +57,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
     _determinePosition();
   }
 
-  // ── Fungsi Mendeteksi Lokasi GPS Asli ────────────────────────
+  // ── Deteksi Posisi GPS ─────────────────────────────────────────────────────
   Future<void> _determinePosition() async {
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
@@ -64,19 +70,23 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
         desiredAccuracy: LocationAccuracy.high,
       );
       if (mounted) {
-        setState(() {
-          _userPosition = position;
-          _mapController.move(
+        setState(() => _userPosition = position);
+
+        // Pindah kamera ke lokasi user
+        final controller = await _mapController.future;
+        controller.animateCamera(
+          CameraUpdate.newLatLngZoom(
             LatLng(position.latitude, position.longitude),
             14,
-          );
-        });
+          ),
+        );
       }
     }
+
     _fetchHeatmapData();
   }
 
-  // ── Ambil Data Hybrid dari Backend ──────────────────────────
+  // ── Ambil Data Heatmap dari Backend ───────────────────────────────────────
   Future<void> _fetchHeatmapData() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
@@ -85,8 +95,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
       String url =
           "${ApiService().baseUrl}/traffic-heatmap?minutes=${_predictionMinutes.toInt()}";
       if (_userPosition != null) {
-        url +=
-            "&lat=${_userPosition!.latitude}&lng=${_userPosition!.longitude}";
+        url += "&lat=${_userPosition!.latitude}&lng=${_userPosition!.longitude}";
       }
 
       final response = await http.get(Uri.parse(url));
@@ -108,20 +117,26 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
     }
   }
 
+  // ── Generate Polylines untuk Google Maps ──────────────────────────────────
+  // Backend (TrafficMapController) return geometry sebagai [[lng, lat], ...]
+  // sama seperti sebelumnya — tidak perlu ubah backend
   void _generateAiPolylines(List data) {
-    List<Polyline> newPolylines = [];
+    final newPolylines = <Polyline>{};
 
     for (var item in data) {
-      if (item['geometry'] == null || (item['geometry'] as List).isEmpty)
-        continue;
+      if (item['geometry'] == null || (item['geometry'] as List).isEmpty) continue;
 
-      List<LatLng> points = (item['geometry'] as List).map((coord) {
+      // Konversi [[lng, lat], ...] → List<LatLng>
+      final List<LatLng> points = (item['geometry'] as List).map((coord) {
         return LatLng(
           (coord[1] as num).toDouble(),
           (coord[0] as num).toDouble(),
         );
       }).toList();
 
+      if (points.isEmpty) continue;
+
+      // Tentukan warna berdasarkan congestion level
       Color roadColor;
       switch (item['congestion_level']) {
         case 'sangat_macet':
@@ -137,64 +152,71 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
           roadColor = Colors.green;
       }
 
+      // Google Maps tidak support borderColor seperti flutter_map,
+      // tapi width bisa dipertebal untuk efek serupa
+      _polylineIdCounter++;
       newPolylines.add(
         Polyline(
+          polylineId: PolylineId('road_$_polylineIdCounter'),
           points: points,
           color: roadColor.withOpacity(0.85),
-          strokeWidth: 6.5, // Dipertebal agar lebih mempesona
-          borderColor: Colors.white.withOpacity(0.4),
-          borderStrokeWidth: 1.5,
+          width: 6,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
         ),
       );
     }
-    setState(() {
-      _aiPolylines = newPolylines;
-    });
+
+    setState(() => _aiPolylines = newPolylines);
   }
 
-  void _zoomIn() => _mapController.move(
-    _mapController.camera.center,
-    _mapController.camera.zoom + 1,
-  );
-  void _zoomOut() => _mapController.move(
-    _mapController.camera.center,
-    _mapController.camera.zoom - 1,
-  );
+  // ── Zoom Controls ──────────────────────────────────────────────────────────
+  Future<void> _zoomIn() async {
+    final c = await _mapController.future;
+    c.animateCamera(CameraUpdate.zoomIn());
+  }
 
+  Future<void> _zoomOut() async {
+    final c = await _mapController.future;
+    c.animateCamera(CameraUpdate.zoomOut());
+  }
+
+  // ── BUILD ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     final topPad = MediaQuery.of(context).padding.top;
-    bool isPredicting = _predictionMinutes > 5;
+    final bool isPredicting = _predictionMinutes > 5;
 
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: Stack(
         children: [
-          // ── 1. PETA DINAMIS (TETAP BERWARNA) ────────────────
-          FlutterMap(
-            mapController: _mapController,
-            options: const MapOptions(
-              initialCenter: LatLng(3.5952, 98.6722),
-              initialZoom: 14,
+          // 1. GOOGLE MAP ─────────────────────────────────────────────────────
+          // trafficEnabled: true → menampilkan layer traffic real-time bawaan
+          // Ketika isPredicting, AI polylines ditampilkan DI ATAS traffic layer
+          GoogleMap(
+            onMapCreated: (controller) {
+              if (!_mapController.isCompleted) {
+                _mapController.complete(controller);
+              }
+            },
+            initialCameraPosition: const CameraPosition(
+              target: LatLng(3.5952, 98.6722),
+              zoom: 14,
             ),
-            children: [
-              // MENGGUNAKAN STYLE STREETS AGAR TIDAK ABU-ABU
-              TileLayer(
-                urlTemplate: isPredicting
-                    ? 'https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}'
-                    : 'https://api.mapbox.com/styles/v1/${ApiService.mapboxTrafficStyle}/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}',
-                additionalOptions: const {
-                  'accessToken': ApiService.mapboxToken,
-                },
-                userAgentPackageName: 'com.medanflow.app',
-              ),
-
-              // Garis Jalan AI
-              if (isPredicting) PolylineLayer(polylines: _aiPolylines),
-            ],
+            // Traffic layer Google Maps (ganti Mapbox traffic-day / streets-v12)
+            trafficEnabled: true,
+            // Polyline AI hanya tampil saat mode prediksi
+            polylines: isPredicting ? _aiPolylines : {},
+            myLocationEnabled: true,
+            myLocationButtonEnabled: false,
+            zoomControlsEnabled: false,
+            mapToolbarEnabled: false,
+            compassEnabled: false,
           ),
 
-          // ── 2. Header (Floating glass) ───────────────────────
+          // 2. HEADER ─────────────────────────────────────────────────────────
           Positioned(
             top: topPad + 12,
             left: 20,
@@ -202,17 +224,19 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
             child: _buildHeader(isPredicting),
           ),
 
-          // ── 3. Legend ────────────────────────────────────────
-          Positioned(top: topPad + 85, left: 20, child: _buildLegend()),
+          // 3. LEGEND ─────────────────────────────────────────────────────────
+          // Hanya tampil saat mode prediksi (AI polylines aktif)
+          if (isPredicting)
+            Positioned(top: topPad + 85, left: 20, child: _buildLegend()),
 
-          // ── 4. Zoom Controls ──────────────────────────────────
+          // 4. ZOOM CONTROLS ──────────────────────────────────────────────────
           Positioned(
             right: 20,
             top: MediaQuery.of(context).size.height * 0.38,
             child: _buildZoomControls(),
           ),
 
-          // ── 5. Prediction Panel ───────────────────────────────
+          // 5. PREDICTION PANEL ───────────────────────────────────────────────
           Positioned(
             bottom: 30,
             left: 20,
@@ -220,7 +244,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
             child: _buildPredictionPanel(),
           ),
 
-          // ── 6. Loading Indicator ──────────────────────────────
+          // 6. LOADING INDICATOR ──────────────────────────────────────────────
           if (_isLoading)
             Positioned(
               top: topPad + 80,
@@ -233,7 +257,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
     );
   }
 
-  // ── Widget Helper UI ─────────────────────────────────────────
+  // ── WIDGETS ────────────────────────────────────────────────────────────────
 
   Widget _buildHeader(bool isPredicting) {
     return Container(
@@ -255,18 +279,13 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
           GestureDetector(
             onTap: () => Navigator.pop(context),
             child: Container(
-              width: 38,
-              height: 38,
+              width: 38, height: 38,
               decoration: BoxDecoration(
                 color: _P.b50,
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: _P.b100, width: 1.5),
               ),
-              child: const Icon(
-                Icons.arrow_back_ios_new_rounded,
-                color: _P.b600,
-                size: 15,
-              ),
+              child: const Icon(Icons.arrow_back_ios_new_rounded, color: _P.b600, size: 15),
             ),
           ),
           const SizedBox(width: 12),
@@ -281,10 +300,8 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                   child: const Text(
                     'Prediksi Kemacetan',
                     style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w900,
-                      color: Colors.white,
-                      letterSpacing: -0.3,
+                      fontSize: 15, fontWeight: FontWeight.w900,
+                      color: Colors.white, letterSpacing: -0.3,
                     ),
                   ),
                 ),
@@ -293,9 +310,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                       ? 'Visualisasi Kecerdasan Buatan'
                       : 'Heatmap real-time Kota Medan',
                   style: const TextStyle(
-                    fontSize: 10.5,
-                    color: _P.ink3,
-                    fontWeight: FontWeight.w600,
+                    fontSize: 10.5, color: _P.ink3, fontWeight: FontWeight.w600,
                   ),
                 ),
               ],
@@ -304,8 +319,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
           GestureDetector(
             onTap: _fetchHeatmapData,
             child: Container(
-              width: 38,
-              height: 38,
+              width: 38, height: 38,
               decoration: BoxDecoration(
                 gradient: const LinearGradient(colors: [_P.b500, _P.b700]),
                 borderRadius: BorderRadius.circular(12),
@@ -317,11 +331,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                   ),
                 ],
               ),
-              child: const Icon(
-                Icons.refresh_rounded,
-                color: Colors.white,
-                size: 18,
-              ),
+              child: const Icon(Icons.refresh_rounded, color: Colors.white, size: 18),
             ),
           ),
         ],
@@ -343,10 +353,8 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
           const Text(
             'INFORMASI',
             style: TextStyle(
-              fontSize: 8.5,
-              fontWeight: FontWeight.w800,
-              color: _P.ink4,
-              letterSpacing: 0.8,
+              fontSize: 8.5, fontWeight: FontWeight.w800,
+              color: _P.ink4, letterSpacing: 0.8,
             ),
           ),
           const SizedBox(height: 7),
@@ -367,8 +375,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 10,
-          height: 10,
+          width: 10, height: 10,
           decoration: BoxDecoration(
             color: color.withOpacity(0.85),
             shape: BoxShape.circle,
@@ -378,9 +385,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
         Text(
           label,
           style: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            color: _P.ink,
+            fontSize: 11, fontWeight: FontWeight.w700, color: _P.ink,
           ),
         ),
       ],
@@ -401,8 +406,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        width: 40,
-        height: 40,
+        width: 40, height: 40,
         decoration: BoxDecoration(
           color: Colors.white.withOpacity(0.92),
           borderRadius: BorderRadius.circular(13),
@@ -438,20 +442,14 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox(
-            width: 13,
-            height: 13,
-            child: CircularProgressIndicator(
-              color: Colors.white,
-              strokeWidth: 2,
-            ),
+            width: 13, height: 13,
+            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
           ),
           SizedBox(width: 9),
           Text(
             'AI Menganalisis...',
             style: TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
+              color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700,
             ),
           ),
         ],
@@ -480,18 +478,13 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
           Row(
             children: [
               Container(
-                width: 42,
-                height: 42,
+                width: 42, height: 42,
                 decoration: BoxDecoration(
                   color: _P.b50,
                   borderRadius: BorderRadius.circular(13),
                   border: Border.all(color: _P.b100, width: 1.5),
                 ),
-                child: const Icon(
-                  Icons.psychology_rounded,
-                  color: _P.b600,
-                  size: 24,
-                ),
+                child: const Icon(Icons.psychology_rounded, color: _P.b600, size: 24),
               ),
               const SizedBox(width: 12),
               const Expanded(
@@ -501,27 +494,20 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                     Text(
                       'Analisis Masa Depan',
                       style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w900,
-                        color: _P.ink,
+                        fontSize: 14, fontWeight: FontWeight.w900, color: _P.ink,
                       ),
                     ),
                     Text(
                       'AI Based',
                       style: TextStyle(
-                        fontSize: 10,
-                        color: _P.ink3,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 10, color: _P.ink3, fontWeight: FontWeight.w600,
                       ),
                     ),
                   ],
                 ),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 13,
-                  vertical: 7,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
                 decoration: BoxDecoration(
                   gradient: const LinearGradient(colors: [_P.b500, _P.b700]),
                   borderRadius: BorderRadius.circular(14),
@@ -529,9 +515,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                 child: Text(
                   '+${_predictionMinutes.toInt()} Mnt',
                   style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
+                    color: Colors.white, fontSize: 12, fontWeight: FontWeight.w800,
                   ),
                 ),
               ),
@@ -560,8 +544,7 @@ class _TrafficHeatmapScreenState extends State<TrafficHeatmapScreen> {
                   child: Text(
                     _aiPrediction,
                     style: const TextStyle(
-                      fontSize: 12,
-                      color: _P.ink,
+                      fontSize: 12, color: _P.ink,
                       fontWeight: FontWeight.w500,
                       height: 1.5,
                       fontStyle: FontStyle.italic,

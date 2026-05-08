@@ -4,9 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_map/flutter_map.dart'; 
-import 'package:latlong2/latlong.dart';      
-import 'package:geolocator/geolocator.dart'; 
+import 'package:google_maps_flutter/google_maps_flutter.dart'; // ← GANTI flutter_map
+import 'package:geolocator/geolocator.dart';
 import '../providers/tracking_provider.dart';
 import '../services/api_service.dart';
 import 'landing_page.dart';
@@ -25,14 +24,15 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
   String _driverName = "Memuat...";
   final ApiService _apiService = ApiService();
 
-  final MapController _miniMapController = MapController();
-  LatLng _currentLocation = const LatLng(3.5952, 98.6722); 
+  // ── Ganti MapController → Completer<GoogleMapController> ──────────────────
+  final Completer<GoogleMapController> _miniMapController = Completer();
+  LatLng _currentLocation = const LatLng(3.5952, 98.6722);
   StreamSubscription<Position>? _positionStream;
 
   // Warna Tema Indigo Profesional
-  final Color primaryColor = const Color(0xFF1A237E); 
-  final Color accentColor = const Color(0xFF3949AB);
-  final Color scaffoldBg = const Color(0xFFF8F9FA);
+  final Color primaryColor = const Color(0xFF1A237E);
+  final Color accentColor  = const Color(0xFF3949AB);
+  final Color scaffoldBg   = const Color(0xFFF8F9FA);
 
   @override
   void initState() {
@@ -59,13 +59,14 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
         accuracy: LocationAccuracy.high,
         distanceFilter: 5,
       ),
-    ).listen((Position position) {
-      if (mounted) {
-        setState(() {
-          _currentLocation = LatLng(position.latitude, position.longitude);
-        });
-        _miniMapController.move(_currentLocation, 15);
-      }
+    ).listen((Position position) async {
+      if (!mounted) return;
+      final newLoc = LatLng(position.latitude, position.longitude);
+      setState(() => _currentLocation = newLoc);
+
+      // Pindahkan kamera mini map ke lokasi terbaru
+      final controller = await _miniMapController.future;
+      controller.animateCamera(CameraUpdate.newLatLng(newLoc));
     });
   }
 
@@ -114,7 +115,11 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
               SharedPreferences prefs = await SharedPreferences.getInstance();
               await prefs.clear();
               if (!mounted) return;
-              Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const LandingPage()), (route) => false);
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (_) => const LandingPage()),
+                (route) => false,
+              );
             },
             style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
             child: const Text("KELUAR", style: TextStyle(color: Colors.white)),
@@ -142,7 +147,10 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
               titlePadding: const EdgeInsets.only(bottom: 16),
               title: const Text(
                 "MEDAN FLOW - DRIVER",
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white, letterSpacing: 1.2),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold, fontSize: 16,
+                  color: Colors.white, letterSpacing: 1.2,
+                ),
               ),
               background: Container(
                 decoration: BoxDecoration(
@@ -168,7 +176,7 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                 Stack(
                   children: [
                     Container(
-                      height: 120, 
+                      height: 120,
                       decoration: BoxDecoration(
                         gradient: LinearGradient(
                           colors: [accentColor, scaffoldBg],
@@ -186,12 +194,18 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text("Pantau Posisi & Trafik", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF263238))),
+                      const Text(
+                        "Pantau Posisi & Trafik",
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF263238)),
+                      ),
                       const SizedBox(height: 15),
-                      _buildTrafficMiniMap(),
+                      _buildTrafficMiniMap(), // ← Sudah pakai GoogleMap
 
                       const SizedBox(height: 25),
-                      const Text("Kondisi Operasional", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF263238))),
+                      const Text(
+                        "Kondisi Operasional",
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF263238)),
+                      ),
                       const SizedBox(height: 15),
 
                       if (_loadingInsight)
@@ -211,49 +225,51 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                 ),
               ],
             ),
-          )
+          ),
         ],
       ),
     );
   }
 
+  // ── Mini Map: Ganti 2x FlutterMap TileLayer → GoogleMap trafficEnabled ─────
   Widget _buildTrafficMiniMap() {
     return Container(
       height: 220,
       width: double.infinity,
       decoration: BoxDecoration(
-        color: Colors.black,
         borderRadius: BorderRadius.circular(28),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 15, offset: const Offset(0, 8))],
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 15, offset: const Offset(0, 8)),
+        ],
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(28),
-        child: FlutterMap(
-          mapController: _miniMapController,
-          options: MapOptions(
-            initialCenter: _currentLocation,
-            initialZoom: 15,
+        child: GoogleMap(
+          onMapCreated: (controller) {
+            if (!_miniMapController.isCompleted) {
+              _miniMapController.complete(controller);
+            }
+          },
+          initialCameraPosition: CameraPosition(
+            target: _currentLocation,
+            zoom: 15,
           ),
-          children: [
-            TileLayer(
-              urlTemplate: 'https://api.mapbox.com/styles/v1/mapbox/dark-v11/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}',
-              userAgentPackageName: 'com.medanflow.app',
+          // trafficEnabled = true menggantikan 2 TileLayer Mapbox (dark + traffic-night)
+          trafficEnabled: true,
+          myLocationEnabled: true,
+          myLocationButtonEnabled: false,
+          zoomControlsEnabled: false,
+          mapToolbarEnabled: false,
+          compassEnabled: false,
+          // Marker posisi driver
+          markers: {
+            Marker(
+              markerId: const MarkerId('driver_location'),
+              position: _currentLocation,
+              icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+              infoWindow: const InfoWindow(title: 'Posisi Saya'),
             ),
-            TileLayer(
-              urlTemplate: 'https://api.mapbox.com/styles/v1/mapbox/traffic-night-v2/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}',
-              userAgentPackageName: 'com.medanflow.app',
-              backgroundColor: Colors.transparent,
-            ),
-            MarkerLayer(
-              markers: [
-                Marker(
-                  point: _currentLocation,
-                  width: 60, height: 60,
-                  child: const Icon(Icons.location_history, color: Colors.blueAccent, size: 40),
-                ),
-              ],
-            ),
-          ],
+          },
         ),
       ),
     );
@@ -273,7 +289,11 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
         builder: (context, tracking, child) {
           return Row(
             children: [
-              CircleAvatar(radius: 30, backgroundColor: primaryColor.withOpacity(0.1), child: Icon(Icons.person, color: primaryColor, size: 30)),
+              CircleAvatar(
+                radius: 30,
+                backgroundColor: primaryColor.withOpacity(0.1),
+                child: Icon(Icons.person, color: primaryColor, size: 30),
+              ),
               const SizedBox(width: 15),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -283,10 +303,16 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                   Row(children: [
                     Icon(Icons.circle, size: 10, color: tracking.isTracking ? Colors.green : Colors.orange),
                     const SizedBox(width: 6),
-                    Text(tracking.isTracking ? "SEDANG BERTUGAS" : "SEDANG ISTIRAHAT", style: TextStyle(color: tracking.isTracking ? Colors.green : Colors.orange, fontSize: 12, fontWeight: FontWeight.bold)),
-                  ])
+                    Text(
+                      tracking.isTracking ? "SEDANG BERTUGAS" : "SEDANG ISTIRAHAT",
+                      style: TextStyle(
+                        color: tracking.isTracking ? Colors.green : Colors.orange,
+                        fontSize: 12, fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ]),
                 ],
-              )
+              ),
             ],
           );
         },
@@ -295,7 +321,15 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
   }
 
   Widget _buildErrorSection() {
-    return Container(width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(20)), child: Column(children: [Text(_errorMessage, style: const TextStyle(color: Colors.red, fontSize: 13)), TextButton(onPressed: _fetchInsights, child: const Text("Coba Lagi"))]));
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(color: Colors.red.shade50, borderRadius: BorderRadius.circular(20)),
+      child: Column(children: [
+        Text(_errorMessage, style: const TextStyle(color: Colors.red, fontSize: 13)),
+        TextButton(onPressed: _fetchInsights, child: const Text("Coba Lagi")),
+      ]),
+    );
   }
 
   Widget _buildInsightSection() {
@@ -303,36 +337,68 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
     IconData weatherIcon = Icons.wb_sunny_outlined;
     Color weatherColor = Colors.orange;
     if (_insights!['weather']['condition'].toString().toLowerCase().contains('hujan')) {
-      weatherIcon = Icons.cloudy_snowing; weatherColor = Colors.blue;
+      weatherIcon = Icons.cloudy_snowing;
+      weatherColor = Colors.blue;
     }
     return Column(children: [
       Row(children: [
-        _insightTile("Cuaca Medan", _insights!['weather']['temp'] ?? "--", _insights!['weather']['condition'], weatherIcon, weatherColor),
+        _insightTile("Cuaca Medan", _insights!['weather']['temp'] ?? "--",
+            _insights!['weather']['condition'], weatherIcon, weatherColor),
         const SizedBox(width: 15),
-        _insightTile("Trafik", _insights!['traffic']['description'], "Skor: ${_insights!['work_score']}/100", Icons.traffic_outlined, Colors.deepOrange),
+        _insightTile("Trafik", _insights!['traffic']['description'],
+            "Skor: ${_insights!['work_score']}/100", Icons.traffic_outlined, Colors.deepOrange),
       ]),
       const SizedBox(height: 15),
-      Container(padding: const EdgeInsets.all(18), decoration: BoxDecoration(color: _insights!['is_good_to_work'] ? Colors.green.shade50 : Colors.red.shade50, borderRadius: BorderRadius.circular(20), border: Border.all(color: _insights!['is_good_to_work'] ? Colors.green.shade200 : Colors.red.shade200)), child: Row(children: [Icon(_insights!['is_good_to_work'] ? Icons.check_circle_rounded : Icons.info_rounded, color: _insights!['is_good_to_work'] ? Colors.green.shade700 : Colors.red.shade700), const SizedBox(width: 12), Expanded(child: Text(_insights!['recommendation'], style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, height: 1.4)))])),
+      Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: _insights!['is_good_to_work'] ? Colors.green.shade50 : Colors.red.shade50,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: _insights!['is_good_to_work'] ? Colors.green.shade200 : Colors.red.shade200,
+          ),
+        ),
+        child: Row(children: [
+          Icon(
+            _insights!['is_good_to_work'] ? Icons.check_circle_rounded : Icons.info_rounded,
+            color: _insights!['is_good_to_work'] ? Colors.green.shade700 : Colors.red.shade700,
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Text(_insights!['recommendation'],
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, height: 1.4))),
+        ]),
+      ),
     ]);
   }
 
   Widget _insightTile(String label, String value, String sub, IconData icon, Color color) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.all(16), 
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(22), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10)]), 
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(22),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10)],
+        ),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start, 
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle), child: Icon(icon, color: color, size: 20)), 
-            const SizedBox(height: 12), 
-            Text(label, style: const TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)), 
-            const SizedBox(height: 2), 
-            Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), 
-            Text(sub, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.bold), maxLines: 1, overflow: TextOverflow.ellipsis)
-          ]
-        )
-      )
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle),
+              child: Icon(icon, color: color, size: 20),
+            ),
+            const SizedBox(height: 12),
+            Text(label, style: const TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 2),
+            Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            Text(sub,
+              style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.bold),
+              maxLines: 1, overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -341,23 +407,76 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
       bool active = tracking.isTracking;
       return GestureDetector(
         onTap: () => tracking.toggleTracking(),
-        child: AnimatedContainer(duration: const Duration(milliseconds: 300), width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 25), decoration: BoxDecoration(gradient: LinearGradient(colors: active ? [Colors.red.shade600, Colors.red.shade800] : [primaryColor, accentColor], begin: Alignment.topLeft, end: Alignment.bottomRight), borderRadius: BorderRadius.circular(25), boxShadow: [BoxShadow(color: (active ? Colors.red : primaryColor).withOpacity(0.3), blurRadius: 15, offset: const Offset(0, 8))]), child: Column(children: [Icon(active ? Icons.stop_circle_rounded : Icons.play_circle_fill_rounded, color: Colors.white, size: 55), const SizedBox(height: 10), Text(active ? "BERHENTI MENARIK" : "MULAI MENARIK!", style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1.2)), Text(active ? "Posisi Anda sedang dipantau" : "Klik untuk online di peta Medan", style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 11))])),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: 25),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: active
+                  ? [Colors.red.shade600, Colors.red.shade800]
+                  : [primaryColor, accentColor],
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(25),
+            boxShadow: [
+              BoxShadow(
+                color: (active ? Colors.red : primaryColor).withOpacity(0.3),
+                blurRadius: 15, offset: const Offset(0, 8),
+              ),
+            ],
+          ),
+          child: Column(children: [
+            Icon(active ? Icons.stop_circle_rounded : Icons.play_circle_fill_rounded,
+                color: Colors.white, size: 55),
+            const SizedBox(height: 10),
+            Text(
+              active ? "BERHENTI MENARIK" : "MULAI MENARIK!",
+              style: const TextStyle(
+                  color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1.2),
+            ),
+            Text(
+              active ? "Posisi Anda sedang dipantau" : "Klik untuk online di peta Medan",
+              style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 11),
+            ),
+          ]),
+        ),
       );
     });
   }
 
   Widget _buildVehicleInfo() {
     return Container(
-      padding: const EdgeInsets.all(20), 
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(22), border: Border.all(color: Colors.grey.shade200)), 
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
       child: Row(
         children: [
-          Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: primaryColor.withOpacity(0.05), shape: BoxShape.circle), child: Icon(Icons.directions_bus_rounded, color: primaryColor, size: 28)), 
-          const SizedBox(width: 15), 
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("KPUM 64 (BK 1234 AA)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)), Text("Trayek: Amplas - Pinang Baris", style: TextStyle(color: Colors.grey.shade600, fontSize: 12))])), 
-          const Icon(Icons.verified_user_rounded, color: Colors.blue, size: 20)
-        ]
-      )
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: primaryColor.withOpacity(0.05), shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.directions_bus_rounded, color: primaryColor, size: 28),
+          ),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text("KPUM 64 (BK 1234 AA)",
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                Text("Trayek: Amplas - Pinang Baris",
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+              ],
+            ),
+          ),
+          const Icon(Icons.verified_user_rounded, color: Colors.blue, size: 20),
+        ],
+      ),
     );
   }
 }

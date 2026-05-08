@@ -10,6 +10,7 @@ class ApiService {
   final String baseUrl = AppConfig.baseUrl;
 
   static const String mapboxToken = AppConfig.mapboxToken;
+  static const googleMapsKey = AppConfig.googleMapsKey;
   static const String mapboxTrafficStyle = "mapbox/traffic-day-v2";
   static const String mapboxDarkStyle = "mapbox/dark-v11";
 

@@ -1,27 +1,20 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
-import 'package:geolocator/geolocator.dart'; // Wajib untuk deteksi lokasi asli
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart';
 import '../services/api_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Palette & Styling (Konsisten dengan Tema Profesional Medan Flow)
 // ─────────────────────────────────────────────────────────────────────────────
 class _P {
-  static const b50 = Color(0xFFEFF6FF);
+  static const b50  = Color(0xFFEFF6FF);
   static const b100 = Color(0xFFDBEAFE);
-  static const b200 = Color(0xFFBFDBFE);
   static const b300 = Color(0xFF93C5FD);
-  static const b400 = Color(0xFF60A5FA);
   static const b500 = Color(0xFF3B82F6);
   static const b600 = Color(0xFF2563EB);
-  static const b700 = Color(0xFF1D4ED8);
   static const b800 = Color(0xFF1E40AF);
-  static const bg = Color(0xFFEEF4FF);
-  static const card = Colors.white;
-  static const ink = Color(0xFF0F172A);
+  static const ink  = Color(0xFF0F172A);
   static const ink2 = Color(0xFF334155);
   static const ink3 = Color(0xFF64748B);
   static const ink4 = Color(0xFF94A3B8);
@@ -39,32 +32,31 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
     with SingleTickerProviderStateMixin {
   // ── Kontroler & Data ───────────────────────────────────────────────────────
   final ApiService _apiService = ApiService();
-  final MapController _mapController = MapController();
+  final Completer<GoogleMapController> _mapController = Completer();
 
-  List<Marker> _markers = [];
+  // Google Maps pakai Set<Marker>, bukan List<Marker>
+  Set<Marker> _markers = {};
   Timer? _timer;
   bool _isLoading = true;
   List<dynamic> _angkotList = [];
-  LatLng _initialCameraCenter = const LatLng(3.5952, 98.6722); // Default Medan jika GPS gagal
+  LatLng _cameraCenter = const LatLng(3.5952, 98.6722); // Default Medan
 
-  // ── Animation ────────────────────────────────────────────────
+  // ── Animation ─────────────────────────────────────────────────────────────
   late AnimationController _orbCtrl;
 
   @override
   void initState() {
     super.initState();
-    _initTracking();
-    
     _orbCtrl = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
     )..repeat(reverse: true);
+    _initTracking();
   }
 
-  // Gabungan inisialisasi data dan lokasi user
   Future<void> _initTracking() async {
-    await _determineUserPosition(); // Cari lokasi user dulu (Toba atau mana pun)
-    _fetchData(); // Ambil data angkot
+    await _determineUserPosition();
+    _fetchData();
     _timer = Timer.periodic(const Duration(seconds: 10), (t) => _fetchData());
   }
 
@@ -75,49 +67,38 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
     super.dispose();
   }
 
-  // FUNGSI UTAMA: Mendeteksi Lokasi Asli Tanpa Cheat
+  // ── Deteksi Lokasi User ────────────────────────────────────────────────────
   Future<void> _determineUserPosition() async {
-    bool serviceEnabled;
-    LocationPermission permission;
+    if (!await Geolocator.isLocationServiceEnabled()) return;
 
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) return;
-
-    permission = await Geolocator.checkPermission();
+    LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) return;
     }
-
     if (permission == LocationPermission.deniedForever) return;
 
-    // Ambil posisi asli perangkat
-    Position position = await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.high
+    final position = await Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.high,
     );
 
     if (!mounted) return;
-    setState(() {
-      _initialCameraCenter = LatLng(position.latitude, position.longitude);
-    });
+    final newCenter = LatLng(position.latitude, position.longitude);
+    setState(() => _cameraCenter = newCenter);
 
-    // Tunggu frame selesai render sebelum move camera
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _mapController.move(_initialCameraCenter, 14.0);
-    });
+    // Move camera ke lokasi user
+    final controller = await _mapController.future;
+    controller.animateCamera(CameraUpdate.newLatLngZoom(newCenter, 14.0));
   }
 
-  // ── Logika Pengambilan Data Angkot ────────────────────────────────────────
+  // ── Ambil Data Angkot dari API ─────────────────────────────────────────────
   Future<void> _fetchData() async {
     try {
       final data = await _apiService.getActiveAngkots();
       if (!mounted) return;
-      
-      final newMarkers = _buildMarkers(data); // Bangun marker dulu, tanpa setState
-      
       setState(() {
         _angkotList = data;
-        _markers = newMarkers; // Set semua sekaligus, 1x setState
+        _markers = _buildMarkers(data);
         _isLoading = false;
       });
     } catch (e) {
@@ -126,103 +107,79 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
     }
   }
 
-  // ── Pembuatan Marker Berwarna Dinamis ──────────────────────────────────────
-  List<Marker> _buildMarkers(List<dynamic> data) {
-    final newMarkers = <Marker>[];
+  // ── Build Markers untuk Google Maps ───────────────────────────────────────
+  Set<Marker> _buildMarkers(List<dynamic> data) {
+    final newMarkers = <Marker>{};
     for (final angkot in data) {
       final isFull = angkot['crowd_status'] == 'Penuh';
-      final statusColor = isFull ? const Color(0xFFDC2626) : _P.b600;
-
       newMarkers.add(
         Marker(
-          point: LatLng(
+          markerId: MarkerId(angkot['angkot_number'].toString()),
+          position: LatLng(
             double.parse(angkot['latitude'].toString()),
             double.parse(angkot['longitude'].toString()),
           ),
-          width: 80,
-          height: 80,
-          child: GestureDetector(
-            onTap: () => _focusOnAngkot(angkot),
-            child: AnimatedBuilder(
-              animation: _orbCtrl,
-              builder: (context, child) {
-                return Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: statusColor, width: 1),
-                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4)],
-                      ),
-                      child: Text(
-                        angkot['angkot_number'],
-                        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: statusColor),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        Container(
-                          width: 30 + (15 * _orbCtrl.value),
-                          height: 30 + (15 * _orbCtrl.value),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: statusColor.withOpacity(0.2 * (1 - _orbCtrl.value)),
-                          ),
-                        ),
-                        Icon(Icons.directions_bus_rounded, color: statusColor, size: 28),
-                      ],
-                    ),
-                  ],
-                );
-              },
-            ),
+          // Google Maps built-in hue: merah jika penuh, biru jika tidak
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            isFull ? BitmapDescriptor.hueRed : BitmapDescriptor.hueBlue,
           ),
+          infoWindow: InfoWindow(
+            title: 'Angkot ${angkot['angkot_number']}',
+            snippet:
+                '${angkot['crowd_status']} · ${angkot['eta_minutes']} menit · ${angkot['route_name'] ?? 'Rute Medan'}',
+          ),
+          onTap: () => _focusOnAngkot(angkot),
         ),
       );
     }
-    setState(() => _markers = newMarkers);
     return newMarkers;
   }
 
-  void _focusOnAngkot(dynamic angkot) {
-    _mapController.move(
-      LatLng(
-        double.parse(angkot['latitude'].toString()),
-        double.parse(angkot['longitude'].toString()),
+  // ── Navigasi Kamera ────────────────────────────────────────────────────────
+  Future<void> _focusOnAngkot(dynamic angkot) async {
+    final controller = await _mapController.future;
+    controller.animateCamera(
+      CameraUpdate.newLatLngZoom(
+        LatLng(
+          double.parse(angkot['latitude'].toString()),
+          double.parse(angkot['longitude'].toString()),
+        ),
+        15.0,
       ),
-      15.0,
     );
   }
 
-  void _zoomIn() => _mapController.move(_mapController.camera.center, _mapController.camera.zoom + 1);
-  void _zoomOut() => _mapController.move(_mapController.camera.center, _mapController.camera.zoom - 1);
+  Future<void> _zoomIn() async {
+    final c = await _mapController.future;
+    c.animateCamera(CameraUpdate.zoomIn());
+  }
 
+  Future<void> _zoomOut() async {
+    final c = await _mapController.future;
+    c.animateCamera(CameraUpdate.zoomOut());
+  }
+
+  // ── BUILD ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       extendBodyBehindAppBar: true,
       body: Stack(
         children: [
-          // 1. LAYER PETA (MAPBOX TRAFFIC) ────────────────────────────────────
-          FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _initialCameraCenter,
-              initialZoom: 13,
+          // 1. GOOGLE MAP ─────────────────────────────────────────────────────
+          GoogleMap(
+            onMapCreated: (controller) => _mapController.complete(controller),
+            initialCameraPosition: CameraPosition(
+              target: _cameraCenter,
+              zoom: 13,
             ),
-            children: [
-              TileLayer(
-                urlTemplate: 'https://api.mapbox.com/styles/v1/${ApiService.mapboxTrafficStyle}/tiles/256/{z}/{x}/{y}@2x?access_token=${ApiService.mapboxToken}',
-                additionalOptions: const {'accessToken': ApiService.mapboxToken},
-                userAgentPackageName: 'com.medanflow.app',
-              ),
-              MarkerLayer(markers: _markers),
-            ],
+            markers: _markers,
+            trafficEnabled: true,        // ← Ganti Mapbox traffic tile layer
+            myLocationEnabled: true,
+            myLocationButtonEnabled: false, // kita buat tombol sendiri
+            zoomControlsEnabled: false,     // kita buat tombol sendiri
+            mapToolbarEnabled: false,
+            compassEnabled: false,
           ),
 
           // 2. ZOOM & MY LOCATION CONTROLS ────────────────────────────────────
@@ -235,7 +192,11 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
                 const SizedBox(height: 8),
                 _buildMapActionBtn(Icons.remove_rounded, _zoomOut),
                 const SizedBox(height: 8),
-                _buildMapActionBtn(Icons.my_location_rounded, _determineUserPosition, accent: true),
+                _buildMapActionBtn(
+                  Icons.my_location_rounded,
+                  _determineUserPosition,
+                  accent: true,
+                ),
               ],
             ),
           ),
@@ -250,7 +211,9 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
           if (_isLoading)
             Container(
               color: Colors.white.withOpacity(0.5),
-              child: const Center(child: CircularProgressIndicator(color: _P.b600, strokeWidth: 3)),
+              child: const Center(
+                child: CircularProgressIndicator(color: _P.b600, strokeWidth: 3),
+              ),
             ),
         ],
       ),
@@ -265,10 +228,13 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
         decoration: BoxDecoration(
           gradient: const LinearGradient(
             colors: [_P.b600, _P.b800, _P.dark],
-            begin: Alignment.topLeft, end: Alignment.bottomRight,
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
           borderRadius: BorderRadius.circular(22),
-          boxShadow: [BoxShadow(color: _P.b600.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 6))],
+          boxShadow: [
+            BoxShadow(color: _P.b600.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 6)),
+          ],
         ),
         child: Row(
           children: [
@@ -279,7 +245,8 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
                 borderRadius: BorderRadius.circular(12),
                 onTap: () => Navigator.pop(context),
                 child: const SizedBox(
-                  width: 40, height: 40,
+                  width: 40,
+                  height: 40,
                   child: Icon(Icons.arrow_back_ios_new_rounded, size: 16, color: Colors.white),
                 ),
               ),
@@ -289,10 +256,21 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Live Tracking Angkot', 
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: -0.2)),
-                  Text('GPS Aktif - Lokasi Real-time', 
-                    style: TextStyle(fontSize: 10.5, color: Colors.white.withOpacity(0.6), fontWeight: FontWeight.w600)),
+                  const Text(
+                    'Live Tracking Angkot',
+                    style: TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w900,
+                      color: Colors.white, letterSpacing: -0.2,
+                    ),
+                  ),
+                  Text(
+                    'GPS Aktif - Lokasi Real-time',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: Colors.white.withOpacity(0.6),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -306,13 +284,22 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
   Widget _buildLiveBadge() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(20),
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(width: 6, height: 6, decoration: const BoxDecoration(color: Color(0xFF4ADE80), shape: BoxShape.circle)),
+          Container(
+            width: 6, height: 6,
+            decoration: const BoxDecoration(color: Color(0xFF4ADE80), shape: BoxShape.circle),
+          ),
           const SizedBox(width: 5),
-          const Text('LIVE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 0.5)),
+          const Text(
+            'LIVE',
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 0.5),
+          ),
         ],
       ),
     );
@@ -325,7 +312,9 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
         color: accent ? _P.b600 : Colors.white,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: _P.b100, width: 1.5),
-        boxShadow: [BoxShadow(color: _P.b500.withOpacity(0.12), blurRadius: 10, offset: const Offset(0, 3))],
+        boxShadow: [
+          BoxShadow(color: _P.b500.withOpacity(0.12), blurRadius: 10, offset: const Offset(0, 3)),
+        ],
       ),
       child: IconButton(
         padding: EdgeInsets.zero,
@@ -349,17 +338,31 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
           ),
           child: Column(
             children: [
-              Container(margin: const EdgeInsets.symmetric(vertical: 14), width: 40, height: 4, decoration: BoxDecoration(color: _P.b100, borderRadius: BorderRadius.circular(10))),
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 14),
+                width: 40, height: 4,
+                decoration: BoxDecoration(color: _P.b100, borderRadius: BorderRadius.circular(10)),
+              ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 15),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text('ARMADA AKTIF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: _P.ink, letterSpacing: 0.8)),
+                    const Text(
+                      'ARMADA AKTIF',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: _P.ink, letterSpacing: 0.8),
+                    ),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                      decoration: BoxDecoration(color: _P.b50, borderRadius: BorderRadius.circular(20), border: Border.all(color: _P.b100)),
-                      child: Text('${_angkotList.length} Unit', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: _P.b600)),
+                      decoration: BoxDecoration(
+                        color: _P.b50,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: _P.b100),
+                      ),
+                      child: Text(
+                        '${_angkotList.length} Unit',
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: _P.b600),
+                      ),
                     ),
                   ],
                 ),
@@ -415,12 +418,16 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Angkot ${angkot['angkot_number']}', 
-                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: _P.ink)),
+                    Text(
+                      'Angkot ${angkot['angkot_number']}',
+                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: _P.ink),
+                    ),
                     const SizedBox(height: 2),
-                    Text(angkot['route_name'] ?? 'Rute Medan', 
+                    Text(
+                      angkot['route_name'] ?? 'Rute Medan',
                       maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12, color: _P.ink3, fontWeight: FontWeight.w600)),
+                      style: const TextStyle(fontSize: 12, color: _P.ink3, fontWeight: FontWeight.w600),
+                    ),
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -428,8 +435,10 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
                         const SizedBox(width: 10),
                         const Icon(Icons.timer_outlined, size: 14, color: _P.ink4),
                         const SizedBox(width: 4),
-                        Text('${angkot['eta_minutes']} Menit', 
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: _P.ink2)),
+                        Text(
+                          '${angkot['eta_minutes']} Menit',
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: _P.ink2),
+                        ),
                       ],
                     ),
                   ],
@@ -450,11 +459,17 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
       decoration: BoxDecoration(
         color: isFull ? const Color(0xFFFEF2F2) : const Color(0xFFF0FDF4),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: isFull ? const Color(0xFFFECACA) : const Color(0xFF86EFAC)),
+        border: Border.all(
+          color: isFull ? const Color(0xFFFECACA) : const Color(0xFF86EFAC),
+        ),
       ),
       child: Text(
         status.toUpperCase(),
-        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: isFull ? const Color(0xFFDC2626) : const Color(0xFF15803D)),
+        style: TextStyle(
+          fontSize: 9,
+          fontWeight: FontWeight.w900,
+          color: isFull ? const Color(0xFFDC2626) : const Color(0xFF15803D),
+        ),
       ),
     );
   }
@@ -470,11 +485,16 @@ class _AngkotTrackingScreenState extends State<AngkotTrackingScreen>
             child: const Icon(Icons.bus_alert_rounded, size: 36, color: _P.b300),
           ),
           const SizedBox(height: 15),
-          const Text('Tidak Ada Armada Aktif', 
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: _P.ink2)),
+          const Text(
+            'Tidak Ada Armada Aktif',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: _P.ink2),
+          ),
           const SizedBox(height: 4),
-          const Text('Gunakan tombol GPS untuk memusatkan peta ke lokasi Anda.', 
-            style: TextStyle(fontSize: 12, color: _P.ink4, fontWeight: FontWeight.w600)),
+          const Text(
+            'Gunakan tombol GPS untuk memusatkan peta ke lokasi Anda.',
+            style: TextStyle(fontSize: 12, color: _P.ink4, fontWeight: FontWeight.w600),
+            textAlign: TextAlign.center,
+          ),
         ],
       ),
     );

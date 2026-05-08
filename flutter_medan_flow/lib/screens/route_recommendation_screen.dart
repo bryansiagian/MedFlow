@@ -1,18 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_medan_flow/services/api_service.dart';
-import '../config.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 // ─────────────────────────────────────────────
 // Palette (Profesional Medan Flow)
 // ─────────────────────────────────────────────
 class _P {
-  static const b50 = Color(0xFFEFF6FF);
+  static const b50  = Color(0xFFEFF6FF);
   static const b100 = Color(0xFFDBEAFE);
   static const b200 = Color(0xFFBFDBFE);
   static const b300 = Color(0xFF93C5FD);
@@ -21,9 +19,9 @@ class _P {
   static const b600 = Color(0xFF2563EB);
   static const b700 = Color(0xFF1D4ED8);
   static const b800 = Color(0xFF1E40AF);
-  static const bg = Color(0xFFEEF4FF);
+  static const bg   = Color(0xFFEEF4FF);
   static const card = Colors.white;
-  static const ink = Color(0xFF0F172A);
+  static const ink  = Color(0xFF0F172A);
   static const ink2 = Color(0xFF334155);
   static const ink3 = Color(0xFF64748B);
   static const ink4 = Color(0xFF94A3B8);
@@ -37,11 +35,21 @@ class RouteRecommendationScreen extends StatefulWidget {
       _RouteRecommendationScreenState();
 }
 
-class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
-  final MapController _mapController = MapController();
+class _RouteRecommendationScreenState
+    extends State<RouteRecommendationScreen> {
+  // ── Google Maps ────────────────────────────────────────────────────────────
+  final Completer<GoogleMapController> _mapController = Completer();
+
+  // Polyline untuk rute (Google Maps pakai Set<Polyline>)
+  Set<Polyline> _polylines = {};
+
+  // Markers (titik asal user)
+  Set<Marker> _markers = {};
+
+  // ── State ──────────────────────────────────────────────────────────────────
   List _recommendations = [];
   bool _isLoading = false;
-  Map<String, Map<String, double>> _mapboxCoords = {};
+  int? _selectedRouteIndex;
   Timer? _debounce;
 
   final TextEditingController _originController = TextEditingController(
@@ -50,33 +58,21 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
   final TextEditingController _destController = TextEditingController();
   final FocusNode _destFocusNode = FocusNode();
 
-  final List<String> _popularDestinations = [
-    "Pinang Baris",
-    "Amplas",
-    "Lapangan Merdeka",
-    "Carrefour Multatuli",
-    "Sunggal",
-    "Helvetia",
-    "Padang Bulan",
-    "Kampung Lalang",
-    "Marelan",
-    "Belawan",
-    "Polonia",
-    "Aksara",
-    "Pancing",
-    "Pasar Petisah",
-    "Tembung",
-    "Delitua",
-    "Sei Sikambing",
-  ];
-
-  List<String> _filteredSuggestions = [];
+  // ── Google Places Autocomplete ─────────────────────────────────────────────
+  // Suggestion dari Google Places (nama, lat, lng)
+  List<Map<String, dynamic>> _placeSuggestions = [];
   bool _showSuggestions = false;
 
+  // Koordinat tujuan yang dipilih dari suggestion
+  double? _destLat;
+  double? _destLng;
+
+  // API Key Google (ambil dari ApiService atau langsung)
+  // Pastikan sama dengan key di AndroidManifest.xml
+  static const _googleApiKey = ApiService.googleMapsKey; // ← sesuaikan dengan konstanta di ApiService Anda
+
+  // ── GPS ────────────────────────────────────────────────────────────────────
   Position? _userPosition;
-  List<LatLng> _currentPolyline = [];
-  int? _selectedRouteIndex;
-  
 
   @override
   void initState() {
@@ -98,117 +94,140 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     super.dispose();
   }
 
+  // ── Deteksi Posisi User ────────────────────────────────────────────────────
   Future<void> _determinePosition() async {
     setState(() => _originController.text = "Mendeteksi GPS...");
+
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
     }
+
     if (permission == LocationPermission.always ||
         permission == LocationPermission.whileInUse) {
-      Position position = await Geolocator.getCurrentPosition(
+      final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      if (mounted) {
-        setState(() {
-          _userPosition = position;
-          _originController.text = "Lokasi Saya Saat Ini";
-          _mapController.move(
-            LatLng(position.latitude, position.longitude),
-            14,
-          );
-        });
-      }
+
+      if (!mounted) return;
+      final userLatLng = LatLng(position.latitude, position.longitude);
+
+      setState(() {
+        _userPosition = position;
+        _originController.text = "Lokasi Saya Saat Ini";
+        // Tambah marker biru untuk posisi user
+        _markers = {
+          Marker(
+            markerId: const MarkerId('user_location'),
+            position: userLatLng,
+            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+            infoWindow: const InfoWindow(title: 'Posisi Saya'),
+          ),
+        };
+      });
+
+      // Pindah kamera ke posisi user
+      final controller = await _mapController.future;
+      controller.animateCamera(CameraUpdate.newLatLngZoom(userLatLng, 14));
     } else {
       if (mounted) setState(() => _originController.text = "Izin GPS Ditolak");
     }
   }
 
-  Future<void> _searchMapbox(String query) async {
+  // ── Google Places Autocomplete ─────────────────────────────────────────────
+  Future<void> _searchGooglePlaces(String query) async {
     if (query.length < 2) return;
-    final encodedQuery = Uri.encodeComponent(query);
 
-    // Ganti ke Search Box API — lebih pintar, support bahasa lokal
+    // Bias pencarian ke area Medan
+    const location = '3.5952,98.6722';
+    const radius = '50000'; // 50 km dari pusat Medan
+
     final uri = Uri.parse(
-      "https://api.mapbox.com/search/searchbox/v1/suggest"
+      'https://maps.googleapis.com/maps/api/place/autocomplete/json',
     ).replace(queryParameters: {
-      'q': query,
-      'proximity': '98.6722,3.5952',
-      'bbox': '98.3,3.0,99.2,4.3',
+      'input': query,
+      'location': location,
+      'radius': radius,
       'language': 'id',
-      'limit': '6',
-      'session_token': 'medan-flow-session',
-      'access_token': AppConfig.mapboxToken,
+      'components': 'country:id',
+      'key': _googleApiKey,
     });
-
-    debugPrint("🔍 Search URL: $uri");
 
     try {
       final res = await http.get(uri);
-      debugPrint("📡 Status: ${res.statusCode}");
-
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
-        final suggestions = data['suggestions'] as List;
-        debugPrint("✅ Results: ${suggestions.length}");
+        final predictions = data['predictions'] as List;
 
         setState(() {
-          _filteredSuggestions = suggestions
-              .map((s) => s['name'] + (s['place_formatted'] != null ? ', ${s['place_formatted']}' : ''))
-              .cast<String>()
+          _placeSuggestions = predictions
+              .map((p) => {
+                    'description': p['description'] as String,
+                    'place_id': p['place_id'] as String,
+                  })
               .toList();
-          _mapboxCoords = {
-            ..._mapboxCoords,
-            for (var s in suggestions)
-              if (s['geometry'] != null)
-                (s['name'] + (s['place_formatted'] != null ? ', ${s['place_formatted']}' : '')): {
-                  'lat': (s['geometry']['coordinates'][1] as num).toDouble(),
-                  'lng': (s['geometry']['coordinates'][0] as num).toDouble(),
-                }
-          };
-          _showSuggestions = _filteredSuggestions.isNotEmpty;
+          _showSuggestions = _placeSuggestions.isNotEmpty;
         });
       }
     } catch (e) {
-      debugPrint("❌ Error: $e");
+      debugPrint('Places Autocomplete error: $e');
+    }
+  }
+
+  // Ambil detail koordinat dari place_id
+  Future<void> _getPlaceDetail(String placeId, String description) async {
+    final uri = Uri.parse(
+      'https://maps.googleapis.com/maps/api/place/details/json',
+    ).replace(queryParameters: {
+      'place_id': placeId,
+      'fields': 'geometry',
+      'key': _googleApiKey,
+    });
+
+    try {
+      final res = await http.get(uri);
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final loc = data['result']['geometry']['location'];
+        setState(() {
+          _destLat = (loc['lat'] as num).toDouble();
+          _destLng = (loc['lng'] as num).toDouble();
+        });
+      }
+    } catch (e) {
+      debugPrint('Place Detail error: $e');
     }
   }
 
   void _onDestChanged(String value) {
     if (value.trim().isEmpty) {
       setState(() {
-        _filteredSuggestions = [];
+        _placeSuggestions = [];
         _showSuggestions = false;
+        _destLat = null;
+        _destLng = null;
       });
       return;
     }
-
-    // Debounce 500ms — hemat API call
+    // Debounce 500ms
     if (_debounce?.isActive ?? false) _debounce!.cancel();
     _debounce = Timer(const Duration(milliseconds: 500), () {
-      _searchMapbox(value);
+      _searchGooglePlaces(value);
     });
   }
 
-  void _selectDestination(String place) {
-    _destController.text = place;
+  Future<void> _selectDestination(Map<String, dynamic> place) async {
+    _destController.text = place['description'];
     _destFocusNode.unfocus();
     setState(() {
       _showSuggestions = false;
-      _filteredSuggestions = [];
+      _placeSuggestions = [];
     });
+    // Ambil koordinat tujuan
+    await _getPlaceDetail(place['place_id'], place['description']);
   }
 
-  void _clearDest() {
-    _destController.clear();
-    setState(() {
-      _showSuggestions = false;
-      _filteredSuggestions = [];
-    });
-    _destFocusNode.requestFocus();
-  }
-
-  // ── LOGIKA HYBRID ANALYTICS (Laravel + Mapbox Direct) ──────────────────
+  // ── Fetch Rute dari Laravel + Google Directions ────────────────────────────
   Future<void> _fetchSmartRoutes() async {
     final dest = _destController.text.trim();
     if (dest.isEmpty) {
@@ -220,46 +239,40 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
 
     setState(() {
       _isLoading = true;
-      _currentPolyline = [];
+      _polylines = {};
       _selectedRouteIndex = null;
     });
 
     try {
-      // Ambil koordinat tujuan dari Mapbox Geocoding
-      final coords = _mapboxCoords[dest];
-
-      // Step 1: Panggil Laravel dengan koordinat tujuan dari Mapbox
+      // Step 1: Panggil Laravel untuk rekomendasi angkot
       final queryParams = <String, String>{'dest': dest};
       if (_userPosition != null) {
         queryParams['lat'] = _userPosition!.latitude.toString();
         queryParams['lng'] = _userPosition!.longitude.toString();
       }
-      if (coords != null) {
-        queryParams['dest_lat'] = coords['lat'].toString();
-        queryParams['dest_lng'] = coords['lng'].toString();
+      if (_destLat != null && _destLng != null) {
+        queryParams['dest_lat'] = _destLat.toString();
+        queryParams['dest_lng'] = _destLng.toString();
       }
 
       final uri = Uri.parse(
-        "${AppConfig.baseUrl}/recommendations",
+        "${ApiService().baseUrl}/recommendations",
       ).replace(queryParameters: queryParams);
+
       final response = await http.get(uri);
 
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
 
-        // Step 2: Ambil rute jalan meliuk (Geometry) langsung dari Mapbox API
-        if (_userPosition != null && data.isNotEmpty) {
-          final dLat = (data[0]['dest_lat'] as num).toDouble();
-          final dLng = (data[0]['dest_lng'] as num).toDouble();
-
-          final geometry = await _fetchMapboxGeometry(
+        // Step 2: Ambil rute dari Google Directions API (ganti Mapbox)
+        if (_userPosition != null && data.isNotEmpty && _destLat != null && _destLng != null) {
+          final geometry = await _fetchGoogleDirectionsGeometry(
             _userPosition!.latitude,
             _userPosition!.longitude,
-            dLat,
-            dLng,
+            _destLat!,
+            _destLng!,
           );
 
-          // Masukkan geometry ke semua hasil rute
           for (var item in data) {
             item['geometry'] = geometry;
           }
@@ -274,7 +287,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
           _drawRoute(_recommendations[0]['geometry'], index: 0);
         }
       } else {
-        debugPrint("Laravel error: ${response.statusCode} ${response.body}");
+        debugPrint("Laravel error: ${response.statusCode}");
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Gagal mengambil data rute")),
@@ -293,57 +306,114 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     }
   }
 
-  // Fungsi memanggil Mapbox langsung (Anti-timeout AWS)
-  Future<List> _fetchMapboxGeometry(
-    double oLat,
-    double oLng,
-    double dLat,
-    double dLng,
+  // ── Google Directions API (ganti Mapbox Directions) ────────────────────────
+  // Return: List of LatLng untuk polyline
+  Future<List<LatLng>> _fetchGoogleDirectionsGeometry(
+    double oLat, double oLng,
+    double dLat, double dLng,
   ) async {
     try {
-      final url =
-          "https://api.mapbox.com/directions/v5/mapbox/driving-traffic/$oLng,$oLat;$dLng,$dLat"
-          "?geometries=geojson&overview=full&access_token=${AppConfig.mapboxToken}";
-      final res = await http.get(Uri.parse(url));
+      final uri = Uri.parse(
+        'https://maps.googleapis.com/maps/api/directions/json',
+      ).replace(queryParameters: {
+        'origin': '$oLat,$oLng',
+        'destination': '$dLat,$dLng',
+        'mode': 'driving',
+        'departure_time': 'now',       // traffic real-time
+        'traffic_model': 'best_guess',
+        'language': 'id',
+        'key': _googleApiKey,
+      });
+
+      final res = await http.get(uri);
       if (res.statusCode == 200) {
-        return jsonDecode(res.body)['routes'][0]['geometry']['coordinates'];
+        final data = jsonDecode(res.body);
+        if (data['status'] == 'OK') {
+          // Google encode polyline pakai encoded polyline format
+          final encodedPolyline =
+              data['routes'][0]['overview_polyline']['points'] as String;
+          return _decodePolyline(encodedPolyline);
+        }
       }
     } catch (e) {
-      debugPrint("Mapbox Direct Error: $e");
+      debugPrint('Google Directions error: $e');
     }
     return [];
   }
 
-  void _drawRoute(dynamic geometry, {int? index}) {
-    if (geometry == null || geometry is! List || geometry.isEmpty) return;
-    List<LatLng> points = geometry
-        .map<LatLng>(
-          (c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
-        )
-        .toList();
+  // Decode Google encoded polyline → List<LatLng>
+  List<LatLng> _decodePolyline(String encoded) {
+    final points = <LatLng>[];
+    int index = 0, len = encoded.length;
+    int lat = 0, lng = 0;
+
+    while (index < len) {
+      int b, shift = 0, result = 0;
+      do {
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      final dlat = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+      lat += dlat;
+
+      shift = 0;
+      result = 0;
+      do {
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      final dlng = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+      lng += dlng;
+
+      points.add(LatLng(lat / 1e5, lng / 1e5));
+    }
+    return points;
+  }
+
+  // ── Draw Route di Google Maps ──────────────────────────────────────────────
+  Future<void> _drawRoute(dynamic geometry, {int? index}) async {
+    List<LatLng> points = [];
+
+    if (geometry is List<LatLng>) {
+      points = geometry;
+    } else if (geometry is List) {
+      // Format lama (dari Mapbox: [[lng, lat], ...]) — fallback
+      points = geometry
+          .map<LatLng>((c) => LatLng(
+                (c[1] as num).toDouble(),
+                (c[0] as num).toDouble(),
+              ))
+          .toList();
+    }
+
+    if (points.isEmpty) return;
+
     setState(() {
-      _currentPolyline = points;
+      _polylines = {
+        Polyline(
+          polylineId: const PolylineId('main_route'),
+          points: points,
+          color: _P.b600,
+          width: 5,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+        ),
+      };
       if (index != null) _selectedRouteIndex = index;
     });
-    if (points.isNotEmpty)
-      _mapController.move(points[points.length ~/ 2], 12.0);
+
+    // Pindah kamera ke tengah rute
+    if (points.isNotEmpty) {
+      final mid = points[points.length ~/ 2];
+      final controller = await _mapController.future;
+      controller.animateCamera(CameraUpdate.newLatLngZoom(mid, 12));
+    }
   }
 
-    String _formatEta(String etaStr) {
-    final menit = int.tryParse(etaStr.split(" ")[0]) ?? 0;
-    if (menit < 60) return '$menit';
-    final jam = menit ~/ 60;
-    final sisa = menit % 60;
-    return sisa == 0 ? '$jam' : '$jam Jam\n$sisa';
-  }
-
-  String _labelEta(String etaStr) {
-    final menit = int.tryParse(etaStr.split(" ")[0]) ?? 0;
-    if (menit < 60) return 'MENIT';
-    final sisa = menit % 60;
-    return sisa == 0 ? 'JAM' : 'MENIT';
-  }
-
+  // ── BUILD ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -361,22 +431,14 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
               border: Border.all(color: _P.b100, width: 1.5),
             ),
             child: IconButton(
-              icon: const Icon(
-                Icons.arrow_back_ios_new,
-                size: 16,
-                color: _P.b600,
-              ),
+              icon: const Icon(Icons.arrow_back_ios_new, size: 16, color: _P.b600),
               onPressed: () => Navigator.pop(context),
             ),
           ),
         ),
         title: const Text(
           'Navigasi Pintar',
-          style: TextStyle(
-            fontWeight: FontWeight.w900,
-            color: _P.ink,
-            fontSize: 18,
-          ),
+          style: TextStyle(fontWeight: FontWeight.w900, color: _P.ink, fontSize: 18),
         ),
         centerTitle: true,
       ),
@@ -387,61 +449,24 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
         },
         child: Stack(
           children: [
-            FlutterMap(
-              mapController: _mapController,
-              options: const MapOptions(
-                initialCenter: LatLng(3.5952, 98.6722),
-                initialZoom: 13,
+            // 1. GOOGLE MAP ──────────────────────────────────────────────────
+            GoogleMap(
+              onMapCreated: (controller) => _mapController.complete(controller),
+              initialCameraPosition: const CameraPosition(
+                target: LatLng(3.5952, 98.6722),
+                zoom: 13,
               ),
-              children: [
-                TileLayer(
-                  urlTemplate:
-                      'https://api.mapbox.com/styles/v1/mapbox/traffic-day-v2/tiles/256/{z}/{x}/{y}@2x?access_token=${AppConfig.mapboxToken}',
-                  userAgentPackageName: 'com.medanflow.app',
-                ),
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: _currentPolyline,
-                      color: _P.b600,
-                      strokeWidth: 5.5,
-                      strokeCap: StrokeCap.round,
-                      strokeJoin: StrokeJoin.round,
-                    ),
-                  ],
-                ),
-                if (_userPosition != null)
-                  MarkerLayer(
-                    markers: [
-                      Marker(
-                        point: LatLng(
-                          _userPosition!.latitude,
-                          _userPosition!.longitude,
-                        ),
-                        width: 44,
-                        height: 44,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: _P.b600,
-                            boxShadow: [
-                              BoxShadow(
-                                color: _P.b600.withOpacity(0.4),
-                                blurRadius: 10,
-                              ),
-                            ],
-                          ),
-                          child: const Icon(
-                            Icons.my_location_rounded,
-                            color: Colors.white,
-                            size: 22,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
+              markers: _markers,
+              polylines: _polylines,
+              trafficEnabled: true,          // ← ganti Mapbox traffic-day tile
+              myLocationEnabled: true,
+              myLocationButtonEnabled: false,
+              zoomControlsEnabled: false,
+              mapToolbarEnabled: false,
+              compassEnabled: false,
             ),
+
+            // 2. SEARCH PANEL ────────────────────────────────────────────────
             Positioned(
               top: MediaQuery.of(context).padding.top + 66,
               left: 20,
@@ -458,14 +483,13 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildSearchInput(
+                    _buildReadOnlyInput(
                       Icons.my_location_rounded,
-                      "Asal",
                       _originController,
                       _P.b600,
                     ),
                     const Divider(height: 24),
-                    _buildEditableDestInput(),
+                    _buildDestInput(),
                     const SizedBox(height: 16),
                     SizedBox(
                       width: double.infinity,
@@ -479,9 +503,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                           ),
                         ),
                         child: _isLoading
-                            ? const CircularProgressIndicator(
-                                color: Colors.white,
-                              )
+                            ? const CircularProgressIndicator(color: Colors.white)
                             : const Text(
                                 "ANALISIS JALUR TERCEPAT",
                                 style: TextStyle(
@@ -495,6 +517,8 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 ),
               ),
             ),
+
+            // 3. ZOOM CONTROLS ───────────────────────────────────────────────
             Positioned(
               right: 16,
               top: MediaQuery.of(context).size.height * 0.42,
@@ -502,22 +526,30 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 children: [
                   _buildMapActionBtn(
                     Icons.add_rounded,
-                    () => _mapController.move(
-                      _mapController.camera.center,
-                      _mapController.camera.zoom + 1,
-                    ),
+                    () async {
+                      final c = await _mapController.future;
+                      c.animateCamera(CameraUpdate.zoomIn());
+                    },
                   ),
                   const SizedBox(height: 8),
                   _buildMapActionBtn(
                     Icons.remove_rounded,
-                    () => _mapController.move(
-                      _mapController.camera.center,
-                      _mapController.camera.zoom - 1,
-                    ),
+                    () async {
+                      final c = await _mapController.future;
+                      c.animateCamera(CameraUpdate.zoomOut());
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  _buildMapActionBtn(
+                    Icons.my_location_rounded,
+                    _determinePosition,
+                    accent: true,
                   ),
                 ],
               ),
             ),
+
+            // 4. DRAGGABLE RESULTS ────────────────────────────────────────────
             _buildDraggableResults(),
           ],
         ),
@@ -525,7 +557,28 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     );
   }
 
-  Widget _buildEditableDestInput() {
+  // ── WIDGETS ────────────────────────────────────────────────────────────────
+
+  Widget _buildReadOnlyInput(IconData icon, TextEditingController ctrl, Color color) {
+    return Row(
+      children: [
+        Icon(icon, size: 20, color: color),
+        const SizedBox(width: 12),
+        Expanded(
+          child: TextField(
+            controller: ctrl,
+            readOnly: true,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+            decoration: const InputDecoration(
+              isDense: true, border: InputBorder.none, hintText: "Asal",
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDestInput() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -539,9 +592,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 focusNode: _destFocusNode,
                 onChanged: _onDestChanged,
                 style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: _P.ink,
+                  fontSize: 14, fontWeight: FontWeight.bold, color: _P.ink,
                 ),
                 decoration: const InputDecoration(
                   isDense: true,
@@ -550,74 +601,75 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 ),
               ),
             ),
+            // Tombol clear
+            if (_destController.text.isNotEmpty)
+              GestureDetector(
+                onTap: () {
+                  _destController.clear();
+                  setState(() {
+                    _placeSuggestions = [];
+                    _showSuggestions = false;
+                    _destLat = null;
+                    _destLng = null;
+                  });
+                  _destFocusNode.requestFocus();
+                },
+                child: const Icon(Icons.close, size: 18, color: _P.ink4),
+              ),
           ],
         ),
-        if (_showSuggestions)
+
+        // Dropdown suggestion dari Google Places
+        if (_showSuggestions && _placeSuggestions.isNotEmpty)
           Container(
             margin: const EdgeInsets.only(top: 6),
+            constraints: const BoxConstraints(maxHeight: 200),
             decoration: BoxDecoration(
               color: _P.card,
               borderRadius: BorderRadius.circular(14),
               border: Border.all(color: _P.b100),
               boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.08),
-                  blurRadius: 10,
-                ),
+                BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10),
               ],
             ),
-            child: Column(
-              children: _filteredSuggestions
-                  .map(
-                    (s) => ListTile(
-                      title: Text(s, style: const TextStyle(fontSize: 13)),
-                      onTap: () => _selectDestination(s),
-                    ),
-                  )
-                  .toList(),
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: _placeSuggestions.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (context, i) {
+                final place = _placeSuggestions[i];
+                return ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.location_on_outlined, color: _P.b400, size: 18),
+                  title: Text(
+                    place['description'],
+                    style: const TextStyle(fontSize: 13, color: _P.ink),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: () => _selectDestination(place),
+                );
+              },
             ),
           ),
       ],
     );
   }
 
-  Widget _buildMapActionBtn(IconData icon, VoidCallback onTap) {
+  Widget _buildMapActionBtn(IconData icon, VoidCallback onTap, {bool accent = false}) {
     return Container(
+      width: 44, height: 44,
       decoration: BoxDecoration(
-        color: _P.card,
+        color: accent ? _P.b600 : _P.card,
         borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _P.b100, width: 1.5),
         boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 5)],
       ),
       child: IconButton(
-        icon: Icon(icon, color: _P.b600),
+        padding: EdgeInsets.zero,
+        icon: Icon(icon, color: accent ? Colors.white : _P.b600, size: 20),
         onPressed: onTap,
       ),
-    );
-  }
-
-  Widget _buildSearchInput(
-    IconData icon,
-    String hint,
-    TextEditingController ctrl,
-    Color color,
-  ) {
-    return Row(
-      children: [
-        Icon(icon, size: 20, color: color),
-        const SizedBox(width: 12),
-        Expanded(
-          child: TextField(
-            controller: ctrl,
-            readOnly: true,
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-            decoration: InputDecoration(
-              isDense: true,
-              border: InputBorder.none,
-              hintText: hint,
-            ),
-          ),
-        ),
-      ],
     );
   }
 
@@ -632,41 +684,42 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
             color: _P.card,
             borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
             boxShadow: [
-              BoxShadow(
-                color: Colors.black12,
-                blurRadius: 20,
-                offset: Offset(0, -5),
-              ),
+              BoxShadow(color: Colors.black12, blurRadius: 20, offset: Offset(0, -5)),
             ],
           ),
           child: Column(
             children: [
               Container(
                 margin: const EdgeInsets.only(top: 12),
-                width: 40,
-                height: 4,
+                width: 40, height: 4,
                 decoration: BoxDecoration(
-                  color: _P.b100,
-                  borderRadius: BorderRadius.circular(10),
+                  color: _P.b100, borderRadius: BorderRadius.circular(10),
                 ),
               ),
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 12),
                 child: Text(
                   'OPSI RUTE TERBAIK',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w800,
-                    color: _P.ink2,
-                  ),
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: _P.ink2),
                 ),
               ),
               Expanded(
                 child: _recommendations.isEmpty
                     ? SingleChildScrollView(
                         controller: scrollController,
-                        child: const Center(
-                          child: Text("Klik tombol Analisis di atas"),
+                        child: Padding(
+                          padding: const EdgeInsets.all(30),
+                          child: Column(
+                            children: [
+                              Icon(Icons.route_outlined, size: 48, color: _P.b200),
+                              const SizedBox(height: 12),
+                              const Text(
+                                "Masukkan tujuan dan klik\nANALISIS JALUR TERCEPAT",
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: _P.ink3, fontSize: 13),
+                              ),
+                            ],
+                          ),
                         ),
                       )
                     : ListView.builder(
@@ -713,7 +766,7 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                     : const LinearGradient(colors: [_P.b50, _P.b100]),
                 borderRadius: BorderRadius.circular(16),
               ),
-              child: _buildEtaBadge(item['eta'], isSelected),
+              child: _buildEtaBadge(item['eta']?.toString() ?? '0 menit', isSelected),
             ),
             const SizedBox(width: 20),
             Expanded(
@@ -721,14 +774,11 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    item['name'],
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 15,
-                    ),
+                    item['name'] ?? 'Rute Angkot',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                   ),
                   Text(
-                    item['distance'],
+                    item['distance'] ?? '',
                     style: const TextStyle(fontSize: 12, color: _P.ink3),
                   ),
                 ],
@@ -753,13 +803,15 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
     if (menit < 60) {
       return Column(
         children: [
-          Text('$menit', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
-          Text('MENIT', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: subColor)),
+          Text('$menit',
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
+          Text('MENIT',
+            style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: subColor)),
         ],
       );
     }
 
-    final jam = menit ~/ 60;
+    final jam  = menit ~/ 60;
     final sisa = menit % 60;
 
     return Column(
@@ -770,9 +822,11 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
           crossAxisAlignment: CrossAxisAlignment.baseline,
           textBaseline: TextBaseline.alphabetic,
           children: [
-            Text('$jam', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
+            Text('$jam',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
             const SizedBox(width: 2),
-            Text('Jam', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subColor)),
+            Text('Jam',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subColor)),
           ],
         ),
         if (sisa > 0)
@@ -781,9 +835,11 @@ class _RouteRecommendationScreenState extends State<RouteRecommendationScreen> {
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
             children: [
-              Text('$sisa', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
+              Text('$sisa',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
               const SizedBox(width: 2),
-              Text('Min', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subColor)),
+              Text('Min',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: subColor)),
             ],
           ),
       ],

@@ -623,7 +623,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         Icons.how_to_reg_rounded,
         [const Color(0xFFFFF7ED), const Color(0xFFFED7AA)],
         const Color(0xFFEA580C),
-        const DriverApprovalScreen(),
+        const DriverManagementScreen(),
         'Pending',
       ),
       _Mod(
