@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\DriverManagementController;
 use App\Http\Controllers\Api\WeatherController;
 use App\Http\Controllers\Api\DriverController;
+use App\Http\Controllers\Api\AngkotRecommendationController;
 use Illuminate\Support\Facades\Route;
 
 // Public Routes
@@ -44,6 +45,10 @@ Route::get('/driver/insights', [DriverController::class, 'getDashboardInsights']
 Route::post('/register-driver', [AuthController::class, 'registerDriver']);
 Route::post('/verify-otp', [AuthController::class, 'verifyOtp']);
 Route::get('/trips/active', [TripController::class, 'getActiveAngkots']);
+
+Route::get('/angkot/recommend', [AngkotRecommendationController::class, 'recommend']);
+Route::post('/angkot/recommend', [AngkotRecommendationController::class, 'recommend']);
+Route::get('/angkot/search', [AngkotRecommendationController::class, 'search']);
 
 // Protected Routes
 Route::middleware('auth:sanctum')->group(function () {
