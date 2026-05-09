@@ -5,26 +5,18 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use App\Services\GeminiService;
-use App\Models\UserReport;
-use Carbon\Carbon;
 
 class TrafficMapController extends Controller
 {
     public function getPredictiveHeatmap(Request $request)
     {
-        $userLat      = (float) $request->query('lat', 3.5952);
-        $userLng      = (float) $request->query('lng', 98.6722);
-        $minutes      = (int) $request->query('minutes', 5);
-        $googleMapsKey = env('GOOGLE_MAPS_API_KEY'); // ← ganti MAPBOX_ACCESS_TOKEN
+        $userLat = (float) $request->query('lat', 3.5952);
+        $userLng = (float) $request->query('lng', 98.6722);
+        $minutes = (int) $request->query('minutes', 5);
 
         if (!in_array($minutes, [5, 10, 15, 20, 25, 30])) $minutes = 5;
 
-        // 1. Ambil cuaca (tidak berubah)
-        $weatherController = new WeatherController();
-        $weather = $weatherController->getWeatherData();
-
-        // 2. Ambil jalan utama dari OSM (tidak berubah)
+        // 1. Ambil jalan utama dari OSM
         $bbox  = ($userLat - 0.03) . "," . ($userLng - 0.03) . "," . ($userLat + 0.03) . "," . ($userLng + 0.03);
         $query = "[out:json];way[highway~'primary|secondary|trunk']($bbox);out center geom 10;";
 
@@ -50,38 +42,33 @@ class TrafficMapController extends Controller
                 ];
             }
         } catch (\Exception $e) {
-            return response()->json(['data' => [], 'ai_prediction' => 'Gagal koneksi OSM.']);
+            return response()->json([
+                'minutes'       => $minutes,
+                'data'          => [],
+                'ai_prediction' => 'Gagal koneksi OSM.',
+                'factor'        => 1.1,
+                'incidents'     => [],
+            ]);
         }
 
-        // 3. Analisis trafik via Google Directions (ganti Mapbox driving-traffic)
+        // 2. Analisis trafik via ML (tanpa Google Directions / Gemini)
+        $mlService      = new \App\Services\MLPredictionService();
         $predictedRoads = [];
+
         foreach ($roadsFound as $road) {
             try {
-                // Google Directions API — departure_time=now untuk data traffic real-time
-                $resp = Http::timeout(8)->get(
-                    'https://maps.googleapis.com/maps/api/directions/json',
-                    [
-                        'origin'         => "{$userLat},{$userLng}",
-                        'destination'    => "{$road['center']['lat']},{$road['center']['lon']}",
-                        'mode'           => 'driving',
-                        'departure_time' => 'now',
-                        'key'            => $googleMapsKey,
-                    ]
-                )->json();
+                $mlResult = $mlService->predict(
+                    $userLat, $userLng,
+                    (float) $road['center']['lat'],
+                    (float) $road['center']['lon'],
+                );
 
-                if (($resp['status'] ?? '') !== 'OK') continue;
-
-                $leg      = $resp['routes'][0]['legs'][0];
-                $duration = $leg['duration_in_traffic']['value'] ?? $leg['duration']['value'] ?? 0;
-                $distance = $leg['distance']['value'] ?? 0;
-
-                // Hitung kecepatan rata-rata untuk tentukan congestion level
-                $congestion = 'lancar';
-                if ($distance > 0 && $duration > 0) {
-                    $speed = ($distance / $duration) * 3.6; // m/s → km/h
-                    if ($speed < 10)     $congestion = 'macet';
-                    elseif ($speed < 25) $congestion = 'padat';
-                }
+                $congestion = match($mlResult['congestion_level']) {
+                    'Sangat Macet' => 'sangat_macet',
+                    'Macet'        => 'macet',
+                    'Padat'        => 'padat',
+                    default        => 'lancar',
+                };
 
                 $predictedRoads[] = [
                     'name'             => $road['name'],
@@ -95,30 +82,27 @@ class TrafficMapController extends Controller
             }
         }
 
-        // 4. Gemini: Multiplier prediksi (tidak berubah)
+        // 3. Hitung factor prediksi
         $summary      = collect($predictedRoads)->groupBy('congestion_level')->map->count();
-        $futureFactor = $this->getAiFutureFactor($minutes, $summary, $weather);
+        $futureFactor = round(1.1 + ($minutes / 100), 2);
 
-        // Modifikasi level berdasarkan prediksi AI
+        // Modifikasi level berdasarkan prediksi waktu ke depan
         foreach ($predictedRoads as &$r) {
-            if ($futureFactor >= 2.0 && $r['congestion_level'] == 'padat')                    $r['congestion_level'] = 'sangat_macet';
-            if ($futureFactor >= 1.4 && $r['congestion_level'] == 'padat')                    $r['congestion_level'] = 'macet';
-            if ($futureFactor >= 1.2 && $r['congestion_level'] == 'lancar' && $minutes > 15) $r['congestion_level'] = 'padat';
+            if ($futureFactor >= 1.4 && $r['congestion_level'] === 'padat')                    $r['congestion_level'] = 'macet';
+            if ($futureFactor >= 1.2 && $r['congestion_level'] === 'lancar' && $minutes > 15) $r['congestion_level'] = 'padat';
         }
         unset($r);
 
-        // 5. Gemini: Narasi prediksi (tidak berubah)
-        $gemini = new GeminiService();
-        $hour   = Carbon::now('Asia/Jakarta')->addMinutes($minutes)->format('H:i');
-        $aiPrediction = $gemini->analyze(
-            "Kamu adalah asisten prediksi kemacetan kota Medan, Indonesia. " .
-            "Prediksi trafik pukul {$hour} ({$minutes} menit lagi). " .
-            "Cuaca: {$weather['condition']}. " .
-            "Ringkasan kondisi jalan: " . json_encode($summary) . ". " .
-            "Faktor prediksi AI: {$futureFactor}. " .
-            "Berikan prediksi 2-3 kalimat singkat dalam Bahasa Indonesia dan saran praktis untuk pengguna angkot."
-        );
+        // 4. Narasi prediksi sederhana
+        $macetCount   = ($summary['macet'] ?? 0) + ($summary['sangat_macet'] ?? 0);
+        $padatCount   = $summary['padat'] ?? 0;
+        $aiPrediction = match(true) {
+            $macetCount >= 3 => "Beberapa ruas jalan diprediksi macet dalam {$minutes} menit ke depan. Disarankan berangkat lebih awal atau pilih rute alternatif.",
+            $padatCount >= 3 => "Lalu lintas cukup padat dalam {$minutes} menit ke depan. Perkirakan waktu tambahan 5-10 menit.",
+            default          => "Kondisi lalu lintas relatif lancar dalam {$minutes} menit ke depan.",
+        };
 
+        // 5. Incidents
         try {
             $incidents = \App\Models\UserReport::where('expires_at', '>', now())->get();
         } catch (\Exception $e) {
@@ -132,18 +116,5 @@ class TrafficMapController extends Controller
             'factor'        => $futureFactor,
             'incidents'     => $incidents,
         ]);
-    }
-
-    private function getAiFutureFactor($minutes, $summary, $weather): float
-    {
-        $gemini = new GeminiService();
-        $prompt = "Data trafik sekarang: " . json_encode($summary) .
-                  ". Cuaca: {$weather['condition']}." .
-                  " Berikan angka multiplier kemacetan untuk {$minutes} menit ke depan." .
-                  " Jawab ANGKA SAJA antara 0.8 sampai 2.5 (contoh: 1.3).";
-        $text   = trim($gemini->analyze($prompt));
-        preg_match('/([0-9]+\.?[0-9]*)/', $text, $match);
-        $factor = isset($match[1]) ? (float) $match[1] : 1.1;
-        return max(0.8, min(2.5, $factor));
     }
 }

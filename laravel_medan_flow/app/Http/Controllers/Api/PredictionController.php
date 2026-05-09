@@ -4,7 +4,6 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Services\MLPredictionService;
-use App\Services\GeminiService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -12,19 +11,12 @@ use Illuminate\Support\Facades\Log;
 class PredictionController extends Controller
 {
     private MLPredictionService $ml;
-    private GeminiService $gemini;
 
-    public function __construct(MLPredictionService $ml, GeminiService $gemini)
+    public function __construct(MLPredictionService $ml)
     {
-        $this->ml     = $ml;
-        $this->gemini = $gemini;
+        $this->ml = $ml;
     }
 
-    /**
-     * POST /api/predict/travel-time
-     *
-     * Body: { origin_lat, origin_lng, dest_lat, dest_lng }
-     */
     public function getTravelTimePrediction(Request $request)
     {
         $request->validate([
@@ -39,31 +31,25 @@ class PredictionController extends Controller
         $destLat   = (float) $request->dest_lat;
         $destLng   = (float) $request->dest_lng;
 
-        // ── 1. Ambil rute dari OSRM ──────────────────────────
+        // 1. Ambil rute dari OSRM
         $osrmData = $this->fetchOSRMRoute($originLat, $originLng, $destLat, $destLng);
         if (!$osrmData) {
             return response()->json(['error' => 'Gagal mengambil data rute.'], 500);
         }
 
-        $distanceKm      = round($osrmData['distance'] / 1000, 1);
-        $durationNormal  = (int) ($osrmData['duration'] / 60); // menit
-        $trafficDuration = $this->fetchGoogleTrafficDuration($originLat, $originLng, $destLat, $destLng);
+        $distanceKm     = round($osrmData['distance'] / 1000, 1);
+        $durationNormal = (int) ($osrmData['duration'] / 60);
         $encodedPolyline = $osrmData['encoded_polyline'];
 
-        // ── 2. Ambil cuaca dari OpenWeatherMap ───────────────
+        // 2. Ambil cuaca
         $weather     = $this->fetchWeatherCondition($originLat, $originLng);
         $weatherMain = strtolower($weather['main'] ?? 'clear');
 
-        // ── 3. Prediksi ML ───────────────────────────────────
+        // 3. Prediksi ML
         $mlResult   = $this->ml->predict($originLat, $originLng, $destLat, $destLng, $weatherMain);
         $multiplier = $mlResult['travel_multiplier'];
 
-        $trafficRatio = 1.0;
-        if ($trafficDuration && $durationNormal > 0) {
-            $trafficRatio = round($trafficDuration / $durationNormal, 2);
-        }
-
-        // ── 4. Hitung estimasi waktu ─────────────────────────
+        // 4. Hitung estimasi waktu
         $predictedMinutes = (int) round($durationNormal * $multiplier);
         $delayMinutes     = max(0, $predictedMinutes - $durationNormal);
 
@@ -71,95 +57,29 @@ class PredictionController extends Controller
         $normalTime    = $this->formatDuration($durationNormal);
         $delayText     = $delayMinutes > 0 ? "+{$delayMinutes} menit" : 'Tidak ada';
 
-        // ── 5. Build response ────────────────────────────────
+        // 5. Build response
         return response()->json([
-            // Estimasi waktu
-            'predicted_time'   => $predictedTime,
-            'normal_time'      => $normalTime,
-            'delay'            => $delayText,
-            'distance'         => $distanceKm . ' km',
-
-            // ML result
-            // 'congestion_level' => $mlResult['congestion_level'],
-            // 'status_color'     => $mlResult['status_color'],
-            // 'travel_multiplier'=> $multiplier,
-
-            'traffic_ratio' => $trafficRatio,
-            'traffic_duration' => $trafficDuration ? $this->formatDuration($trafficDuration) : null,
-
-            'congestion_level' => $mlResult['congestion_level'],
-            'congestion_index' => $mlResult['congestion_index'],
+            'predicted_time'         => $predictedTime,
+            'normal_time'            => $normalTime,
+            'delay'                  => $delayText,
+            'distance'               => $distanceKm . ' km',
+            'congestion_level'       => $mlResult['congestion_level'],
+            'congestion_index'       => $mlResult['congestion_index'],
             'congestion_level_index' => $mlResult['congestion_level_index'],
-            'status_color' => $mlResult['status_color'],
-            'travel_multiplier' => $multiplier,
-
-            // Polyline rute
-            'encoded_polyline' => $encodedPolyline,
-
-            // Faktor prediksi (untuk UI)
-            'prediction_factors' => array_merge(
+            'status_color'           => $mlResult['status_color'],
+            'travel_multiplier'      => $multiplier,
+            'encoded_polyline'       => $encodedPolyline,
+            'prediction_factors'     => array_merge(
                 $mlResult['prediction_factors'],
                 [
-                    'weather'          => $weather['description'] ?? 'Tidak diketahui',
+                    'weather'          => $weather['description'] ?? 'Cerah',
                     'confidence_level' => $mlResult['confidence_level'],
                     'traffic_source'   => $mlResult['traffic_source'],
                 ]
             ),
-
-            // Debug info (hapus di production)
             'ml_features' => $mlResult['ml_features'],
         ]);
     }
-
-    /**
-     * Ambil durasi perjalanan realtime dari Google Directions API
-     * menggunakan traffic live.
-     */
-    private function fetchGoogleTrafficDuration(
-        float $originLat,
-        float $originLng,
-        float $destLat,
-        float $destLng
-    ): ?int
-    {
-        try {
-            $response = Http::timeout(10)->get(
-                'https://maps.googleapis.com/maps/api/directions/json',
-                [
-                    'origin' => "{$originLat},{$originLng}",
-                    'destination' => "{$destLat},{$destLng}",
-                    'departure_time' => 'now',
-                    'traffic_model' => 'best_guess',
-                    'mode' => 'driving',
-                    'key' => env('GOOGLE_MAPS_API_KEY'),
-                ]
-            );
-
-            $data = $response->json();
-            Log::info('GOOGLE TRAFFIC RESPONSE', $data);
-
-            if (($data['status'] ?? '') !== 'OK') {
-                return null;
-            }
-
-            $leg = $data['routes'][0]['legs'][0] ?? null;
-
-            if (!$leg) {
-                return null;
-            }
-
-            // duration_in_traffic dalam detik
-            return isset($leg['duration_in_traffic']['value'])
-                ? (int) round($leg['duration_in_traffic']['value'] / 60)
-                : null;
-
-        } catch (\Exception $e) {
-            return null;
-        }
-    }
-
-
-    // ── OSRM: Ambil rute gratis tanpa API key ─────────────────────────────
 
     private function fetchOSRMRoute(float $lat1, float $lng1, float $lat2, float $lng2): ?array
     {
@@ -177,19 +97,13 @@ class PredictionController extends Controller
                 if (!$route) return null;
 
                 $distanceKm = $route['distance'] / 1000;
-                $duration   = $route['duration']; // detik dari OSRM
+                $duration   = $route['duration'];
 
-                // ── Koreksi realistis untuk jalan Sumatera ──────
-                // OSRM terlalu optimis, tambah faktor berdasarkan jarak
                 if ($distanceKm > 100) {
-                    // Jarak jauh: jalan antar kota Sumatera, banyak tikungan
-                    // Asumsikan kecepatan rata-rata 55 km/h (lebih realistis)
                     $duration = ($distanceKm / 55) * 3600;
                 } elseif ($distanceKm > 30) {
-                    // Jarak menengah: keluar kota
                     $duration = ($distanceKm / 45) * 3600;
                 }
-                // Dalam kota (<30km): pakai durasi OSRM langsung
 
                 return [
                     'distance'         => $route['distance'],
@@ -207,8 +121,6 @@ class PredictionController extends Controller
         }
     }
 
-    // ── OpenWeatherMap ────────────────────────────────────────────────────
-
     private function fetchWeatherCondition(float $lat, float $lng): array
     {
         try {
@@ -223,7 +135,6 @@ class PredictionController extends Controller
 
             if ($response->successful()) {
                 $data = $response->json();
-                Log::info('GOOGLE TRAFFIC RESPONSE', $data);
                 return [
                     'main'        => $data['weather'][0]['main'] ?? 'Clear',
                     'description' => $data['weather'][0]['description'] ?? 'Cerah',
@@ -236,8 +147,6 @@ class PredictionController extends Controller
 
         return ['main' => 'Clear', 'description' => 'Cerah'];
     }
-
-    // ── Format durasi menit → "X jam Y menit" ────────────────────────────
 
     private function formatDuration(int $minutes): string
     {
