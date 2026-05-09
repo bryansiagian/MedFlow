@@ -58,9 +58,9 @@ class MLPredictionService
         $day  = $day  ?? (int) now()->setTimezone('Asia/Jakarta')->format('w');
 
         $features = $this->extractFeatures($originLat, $originLng, $destLat, $destLng, $weather, $hour, $day);
-        $level    = $this->predictWithRules($features);
+        $congestionIndex = $this->calculateCongestionIndex($features);
 
-        return $this->buildResult($level, $features, $weather, $hour, $day);
+        return $this->buildResult($congestionIndex, $features, $weather, $hour, $day);
     }
 
     /**
@@ -99,56 +99,160 @@ class MLPredictionService
      *
      * Level: 0=Lancar, 1=Padat, 2=Macet, 3=Sangat Macet
      */
-    private function predictWithRules(array $f): int
+    // private function predictWithRules(array $f): int
+    // {
+    //     $score = 0;
+
+    //     // ── Faktor waktu ─────────────────────────────────────
+    //     if ($f['is_rush_evening'] && $f['is_weekday'])  $score += 40;
+    //     elseif ($f['is_rush_morning'] && $f['is_weekday']) $score += 35;
+    //     elseif ($f['is_rush_noon'] && $f['is_weekday'])    $score += 20;
+    //     elseif ($f['is_night'])                            $score -= 20;
+    //     elseif (!$f['is_weekday'])                         $score -= 10;
+
+    //     // ── Faktor cuaca ──────────────────────────────────────
+    //     $score += $f['weather_score'] * 10;
+
+    //     // ── Faktor zona ───────────────────────────────────────
+    //     $zoneFactor = ($f['origin_factor'] + $f['dest_factor']) / 2;
+    //     $score += (int)(($zoneFactor - 1.0) * 30);
+
+    //     // ── Faktor melintas pusat kota ────────────────────────
+    //     if ($f['cross_center']) $score += 15;
+
+    //     // ── Faktor jarak (rute panjang = lebih banyak titik macet)
+    //     if ($f['distance_km'] > 10) $score += 10;
+    //     if ($f['distance_km'] > 20) $score += 10;
+
+    //     // ── Mapping score ke level ────────────────────────────
+    //     if ($score >= 70) return 3; // Sangat Macet
+    //     if ($score >= 45) return 2; // Macet
+    //     if ($score >= 20) return 1; // Padat
+    //     return 0;                   // Lancar
+    // }
+
+    /**
+     * Hitung congestion index kontinu (0 - 100)
+     * Menggantikan sistem level diskrit lama.
+     */
+    private function calculateCongestionIndex(array $f): float
     {
-        $score = 0;
+        $index = 10;
 
-        // ── Faktor waktu ─────────────────────────────────────
-        if ($f['is_rush_evening'] && $f['is_weekday'])  $score += 40;
-        elseif ($f['is_rush_morning'] && $f['is_weekday']) $score += 35;
-        elseif ($f['is_rush_noon'] && $f['is_weekday'])    $score += 20;
-        elseif ($f['is_night'])                            $score -= 20;
-        elseif (!$f['is_weekday'])                         $score -= 10;
+        // ── Faktor waktu ───────────────────────────────
+        if ($f['is_rush_evening'] && $f['is_weekday']) {
+            $index += 30;
+        } elseif ($f['is_rush_morning'] && $f['is_weekday']) {
+            $index += 26;
+        } elseif ($f['is_rush_noon'] && $f['is_weekday']) {
+            $index += 15;
+        }
 
-        // ── Faktor cuaca ──────────────────────────────────────
-        $score += $f['weather_score'] * 10;
+        // malam cenderung lancar
+        if ($f['is_night']) {
+            $index -= 12;
+        }
 
-        // ── Faktor zona ───────────────────────────────────────
-        $zoneFactor = ($f['origin_factor'] + $f['dest_factor']) / 2;
-        $score += (int)(($zoneFactor - 1.0) * 30);
+        // weekend lebih longgar
+        if (!$f['is_weekday']) {
+            $index -= 6;
+        }
 
-        // ── Faktor melintas pusat kota ────────────────────────
-        if ($f['cross_center']) $score += 15;
+        // ── Faktor cuaca ──────────────────────────────
+        $index += ($f['weather_score'] * 6);
 
-        // ── Faktor jarak (rute panjang = lebih banyak titik macet)
-        if ($f['distance_km'] > 10) $score += 10;
-        if ($f['distance_km'] > 20) $score += 10;
+        // ── Faktor zona ───────────────────────────────
+        $zoneWeight = (
+            ($f['origin_factor'] + $f['dest_factor']) / 2
+        );
 
-        // ── Mapping score ke level ────────────────────────────
-        if ($score >= 70) return 3; // Sangat Macet
-        if ($score >= 45) return 2; // Macet
-        if ($score >= 20) return 1; // Padat
-        return 0;                   // Lancar
+        $index += (($zoneWeight - 1.0) * 28);
+
+        // ── Melintas pusat kota ───────────────────────
+        if ($f['cross_center']) {
+            $index += 12;
+        }
+
+        // ── Faktor jarak ──────────────────────────────
+        if ($f['distance_km'] > 5) {
+            $index += 6;
+        }
+
+        if ($f['distance_km'] > 10) {
+            $index += 8;
+        }
+
+        if ($f['distance_km'] > 20) {
+            $index += 10;
+        }
+
+        // ── Interaction effect (NONLINEAR) ───────────
+        // hujan + rush hour = jauh lebih parah
+        if (
+            $f['weather_score'] >= 2 &&
+            (
+                $f['is_rush_morning'] ||
+                $f['is_rush_evening']
+            )
+        ) {
+            $index += 15;
+        }
+
+        // pusat kota + hujan
+        if (
+            $f['cross_center'] &&
+            $f['weather_score'] >= 2
+        ) {
+            $index += 10;
+        }
+
+        // ── Clamp 0 - 100 ────────────────────────────
+        return max(0, min(100, round($index, 1)));
     }
+
 
     /**
      * Bangun response lengkap dari hasil prediksi
      */
-    private function buildResult(int $level, array $features, string $weather, int $hour, int $day): array
+    private function buildResult(float $congestionIndex, array $features, string $weather, int $hour, int $day): array
     {
-        $multipliers = [1.0, 1.35, 1.75, 2.20];
-        $labels      = ['Lancar', 'Padat', 'Macet', 'Sangat Macet'];
-        $colors      = ['green', 'orange', 'red', 'red'];
-        $confidence  = $this->calculateConfidence($features, $level);
+        // $multipliers = [1.0, 1.35, 1.75, 2.20];
+        // $labels      = ['Lancar', 'Padat', 'Macet', 'Sangat Macet'];
+        // $colors      = ['green', 'orange', 'red', 'red'];
+        // $confidence  = $this->calculateConfidence($features, $level);
+        if ($congestionIndex >= 75) {
+            $level = 3;
+            $label = 'Sangat Macet';
+            $color = 'red';
+            $multiplier = 2.2;
+        } elseif ($congestionIndex >= 50) {
+            $level = 2;
+            $label = 'Macet';
+            $color = 'red';
+            $multiplier = 1.75;
+        } elseif ($congestionIndex >= 25) {
+            $level = 1;
+            $label = 'Padat';
+            $color = 'orange';
+            $multiplier = 1.35;
+        } else {
+            $level = 0;
+            $label = 'Lancar';
+            $color = 'green';
+            $multiplier = 1.0;
+        }
+        $confidence = $this->calculateConfidence($features, $congestionIndex);
 
         $days    = ['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
         $weathers = ['clear'=>'Cerah','rain'=>'Hujan','clouds'=>'Berawan','drizzle'=>'Gerimis'];
 
         return [
-            'congestion_level'   => $labels[$level],
-            'congestion_index'   => $level,
-            'travel_multiplier'  => $multipliers[$level],
-            'status_color'       => $colors[$level],
+            'congestion_level'   => $label,
+            //'congestion_index'   => $level,
+            'congestion_index'   => $congestionIndex,
+            'congestion_level_index' => $level,
+            'travel_multiplier'  => $multiplier,
+            'status_color'       => $color,
             'confidence_level'   => $confidence . '%',
             'traffic_source'     => 'ML Model (Random Forest)',
             'prediction_factors' => [
@@ -169,7 +273,7 @@ class MLPredictionService
     /**
      * Hitung confidence score berdasarkan seberapa "jelas" kondisinya
      */
-    private function calculateConfidence(array $f, int $level): int
+    private function calculateConfidence(array $f, float $congestionIndex): int
     {
         $base = 72;
 

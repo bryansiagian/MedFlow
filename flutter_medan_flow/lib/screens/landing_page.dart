@@ -502,7 +502,7 @@ class _LandingPageState extends State<LandingPage>
 
   // Angkot
   List<Map<String, dynamic>> _angkotLangsung = [];
-  List<Map<String, dynamic>> _angkotTransit  = [];
+  List<Map<String, dynamic>> _angkotTransit = [];
   bool _isLoadingAngkot = false;
   bool _showAngkotRekomendasi = false;
 
@@ -740,9 +740,11 @@ class _LandingPageState extends State<LandingPage>
     _searchFocus.unfocus();
 
     setState(() {
-      _showSuggestions    = false;
-      _selectedDestLabel  = fullLabel;
-      _selectedDestCoords = (lat != null && lng != null) ? LatLng(lat, lng) : null;
+      _showSuggestions = false;
+      _selectedDestLabel = fullLabel;
+      _selectedDestCoords = (lat != null && lng != null)
+          ? LatLng(lat, lng)
+          : null;
     });
 
     if (lat != null && lng != null) {
@@ -798,11 +800,10 @@ class _LandingPageState extends State<LandingPage>
 
       if (response['encoded_polyline'] != null) {
         try {
-          final result = PolylinePoints()
-              .decodePolyline(response['encoded_polyline'] as String);
-          points = result
-              .map((p) => LatLng(p.latitude, p.longitude))
-              .toList();
+          final result = PolylinePoints().decodePolyline(
+            response['encoded_polyline'] as String,
+          );
+          points = result.map((p) => LatLng(p.latitude, p.longitude)).toList();
           debugPrint('✅ Polyline points: ${points.length}');
         } catch (e) {
           debugPrint('❌ Decode error: $e');
@@ -813,7 +814,9 @@ class _LandingPageState extends State<LandingPage>
         }
       } else if (response['route_geometry'] != null) {
         for (var p in response['route_geometry']) {
-          points.add(LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble()));
+          points.add(
+            LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble()),
+          );
         }
       } else {
         points = [
@@ -829,6 +832,7 @@ class _LandingPageState extends State<LandingPage>
           _routePolyline = points;
           _routeState = 'result';
         });
+        debugPrint('🏁 Label untuk angkot: "$label"');
         _fetchAngkotRekomendasi(label);
         final c = await _mapController.future;
         c.animateCamera(
@@ -842,7 +846,6 @@ class _LandingPageState extends State<LandingPage>
         );
       }
     } catch (e) {
-      
       debugPrint('Prediction error: $e');
       if (mounted) {
         setState(() => _routeState = 'idle');
@@ -867,10 +870,10 @@ class _LandingPageState extends State<LandingPage>
       _isPinMode = false;
       _selectedDestLabel = null;
       _selectedDestCoords = null;
-      _angkotLangsung        = [];
-      _angkotTransit         = [];
+      _angkotLangsung = [];
+      _angkotTransit = [];
       _showAngkotRekomendasi = false;
-      _isLoadingAngkot       = false;
+      _isLoadingAngkot = false;
     });
     if (_userPosition != null) {
       final c = await _mapController.future;
@@ -911,14 +914,35 @@ class _LandingPageState extends State<LandingPage>
     setState(() => _isLoadingAngkot = true);
 
     try {
-      final beforeComma = tujuanLabel.split(',').first.trim();
-      final cleaned = beforeComma
-          .replaceAll(RegExp(r'^(Jalan|Jl\.?)\s+', caseSensitive: false), '')
-          .trim();
-      final words = cleaned.split(' ');
-      var keyword = words.take(2).join(' ');
+      final parts = tujuanLabel.split(',');
+      String keyword = '';
 
-      // ── Mapping nama panjang → keyword dataset ───────────────
+      // Cari nama jalan dari label Nominatim
+      for (final part in parts) {
+        final trimmed = part.trim();
+        if (trimmed.toLowerCase().startsWith('jalan') ||
+            trimmed.toLowerCase().startsWith('jl')) {
+          keyword = trimmed
+              .replaceAll(
+                RegExp(r'^(Jalan|Jl\.?)\s+', caseSensitive: false),
+                '',
+              )
+              .trim();
+          keyword = keyword.split(' ').take(2).join(' ');
+          break;
+        }
+      }
+
+      // Fallback ke nama tempat (bagian pertama sebelum koma)
+      if (keyword.isEmpty) {
+        final beforeComma = parts.first.trim();
+        final cleaned = beforeComma
+            .replaceAll(RegExp(r'^(Jalan|Jl\.?)\s+', caseSensitive: false), '')
+            .trim();
+        keyword = cleaned.split(' ').take(2).join(' ');
+      }
+
+      // Mapping nama → keyword dataset
       final Map<String, String> keywordMap = {
         'universitas negeri': 'UNIMED',
         'universitas sumatera': 'USU',
@@ -944,37 +968,96 @@ class _LandingPageState extends State<LandingPage>
         'aksara': 'Aksara',
       };
 
-      // Cek apakah ada di mapping
-      final lowerKeyword = keyword.toLowerCase();
+      // ── TAMBAHAN: zona kecamatan → keyword seeder ──
+      final Map<String, String> zonaMap = {
+        'medan petisah': 'Petisah',
+        'medan baru': 'Padang Bulan',
+        'medan sunggal': 'Sunggal',
+        'medan helvetia': 'Helvetia',
+        'medan barat': 'Pinang Baris',
+        'medan timur': 'HM Yamin',
+        'medan tembung': 'Tembung',
+        'medan perjuangan': 'Aksara',
+        'medan area': 'Aksara',
+        'medan denai': 'Denai',
+        'medan amplas': 'Amplas',
+        'medan johor': 'Amplas',
+        'medan kota': 'Sisingamangaraja',
+        'medan maimun': 'Sisingamangaraja',
+        'medan polonia': 'Juanda',
+        'medan selayang': 'Padang Bulan',
+        'medan marelan': 'Marelan',
+        'medan labuhan': 'Belawan',
+        'medan belawan': 'Belawan',
+        'medan deli': 'Martubung',
+      };
+
+      // Cek mapping dari full label dulu (lebih akurat)
+      final lowerFull = tujuanLabel.toLowerCase();
+      bool mapped = false;
       for (final entry in keywordMap.entries) {
-        if (lowerKeyword.contains(entry.key)) {
+        if (lowerFull.contains(entry.key)) {
           keyword = entry.value;
+          mapped = true;
           break;
+        }
+      }
+
+      // Kalau tidak ada di mapping, cek dari keyword yang sudah di-extract
+      if (!mapped) {
+        final lowerKeyword = keyword.toLowerCase();
+        for (final entry in keywordMap.entries) {
+          if (lowerKeyword.contains(entry.key)) {
+            keyword = entry.value;
+            mapped = true;
+            break;
+          }
+        }
+      }
+
+      // ── TAMBAHAN: fallback zona kecamatan kalau masih belum mapped ──
+      if (!mapped) {
+        for (final entry in zonaMap.entries) {
+          if (lowerFull.contains(entry.key)) {
+            keyword = entry.value;
+            debugPrint('🗺️ Fallback zona: ${entry.key} → $keyword');
+            break;
+          }
         }
       }
 
       debugPrint('🚌 Angkot keyword: $keyword');
 
-      final uri = Uri.parse('${ApiService().baseUrl}/angkot/recommend')
-          .replace(queryParameters: {'tujuan': keyword});
+      final uri = Uri.parse(
+        '${ApiService().baseUrl}/angkot/search',
+      ).replace(queryParameters: {'q': keyword});
 
       final res = await http.get(uri);
 
-      if (res.statusCode == 200 && mounted) {
+      debugPrint('🚌 Angkot status: ${res.statusCode}');
+      debugPrint('🚌 Angkot body: ${res.body}');
+
+      if (!mounted) return;
+
+      if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as Map<String, dynamic>;
-        final rekomendasi = data['rekomendasi'] as List? ?? [];
+        final results = data['results'] as List? ?? [];
+
+        debugPrint('🚌 Angkot count: ${results.length}');
 
         setState(() {
-          _angkotLangsung = rekomendasi
+          _angkotLangsung = results
               .map((e) => Map<String, dynamic>.from(e as Map))
-              .take(4)
+              .take(6)
               .toList();
           _showAngkotRekomendasi = _angkotLangsung.isNotEmpty;
           _isLoadingAngkot = false;
         });
+      } else {
+        setState(() => _isLoadingAngkot = false);
       }
     } catch (e) {
-      debugPrint('Angkot error: $e');
+      debugPrint('❌ Angkot error: $e');
       if (mounted) setState(() => _isLoadingAngkot = false);
     }
   }
@@ -1871,73 +1954,33 @@ class _LandingPageState extends State<LandingPage>
               20,
               MediaQuery.of(context).padding.bottom + 20,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: SizedBox(
-                    height: 50,
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: _P.b600,
-                        side: const BorderSide(color: _P.b200, width: 1.5),
-                        backgroundColor: _P.b50,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                      ),
-                      onPressed: _resetRoute,
-                      icon: const Icon(
-                        Icons.refresh_rounded,
-                        size: 16,
-                        color: _P.b600,
-                      ),
-                      label: const Text(
-                        'Rute Lain',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 13,
-                          color: _P.b600,
-                        ),
-                      ),
-                    ),
+            child: SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: _P.b600,
+                  side: const BorderSide(color: _P.b200, width: 1.5),
+                  backgroundColor: _P.b50,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
                   ),
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  flex: 2,
-                  child: SizedBox(
-                    height: 50,
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _P.b600,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        elevation: 0,
-                      ),
-                      onPressed: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const RouteRecommendationScreen(),
-                        ),
-                      ),
-                      icon: const Icon(
-                        Icons.directions_rounded,
-                        size: 18,
-                        color: Colors.white,
-                      ),
-                      label: const Text(
-                        'Detail Rute',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 13,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
+                onPressed: _resetRoute,
+                icon: const Icon(
+                  Icons.refresh_rounded,
+                  size: 16,
+                  color: _P.b600,
+                ),
+                label: const Text(
+                  'Rute Lain',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13,
+                    color: _P.b600,
                   ),
                 ),
-              ],
+              ),
             ),
           ),
           _buildAngkotSection(),
@@ -1947,8 +1990,9 @@ class _LandingPageState extends State<LandingPage>
   }
 
   Widget _buildAngkotSection() {
-    if (!_showAngkotRekomendasi && !_isLoadingAngkot) return const SizedBox.shrink();
-  
+    if (!_showAngkotRekomendasi && !_isLoadingAngkot)
+      return const SizedBox.shrink();
+
     return Container(
       margin: const EdgeInsets.fromLTRB(0, 0, 0, 0),
       decoration: const BoxDecoration(
@@ -1969,44 +2013,56 @@ class _LandingPageState extends State<LandingPage>
                     color: _P.b600,
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(Icons.directions_bus_filled,
-                      color: Colors.white, size: 15),
+                  child: const Icon(
+                    Icons.directions_bus_filled,
+                    color: Colors.white,
+                    size: 15,
+                  ),
                 ),
                 const SizedBox(width: 10),
                 const Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Angkot yang Bisa Dinaiki',
-                          style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                              color: _P.ink)),
-                      Text('Melewati tujuan kamu',
-                          style: TextStyle(
-                              fontSize: 11,
-                              color: _P.ink3,
-                              fontWeight: FontWeight.w500)),
+                      Text(
+                        'Angkot yang Bisa Dinaiki',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          color: _P.ink,
+                        ),
+                      ),
+                      Text(
+                        'Melewati tujuan kamu',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: _P.ink3,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
                     ],
                   ),
                 ),
               ],
             ),
           ),
-  
+
           // ── Loading ──────────────────────────────────────────
           if (_isLoadingAngkot)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 16),
               child: Center(
                 child: SizedBox(
-                  width: 20, height: 20,
+                  width: 20,
+                  height: 20,
                   child: CircularProgressIndicator(
-                      color: _P.b600, strokeWidth: 2.5),
+                    color: _P.b600,
+                    strokeWidth: 2.5,
+                  ),
                 ),
               ),
             ),
-  
+
           // ── List Angkot ──────────────────────────────────────
           if (!_isLoadingAngkot && _angkotLangsung.isNotEmpty)
             SizedBox(
@@ -2022,34 +2078,44 @@ class _LandingPageState extends State<LandingPage>
                 },
               ),
             ),
-  
+
           // ── Empty state ──────────────────────────────────────
           if (!_isLoadingAngkot && _angkotLangsung.isEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
               child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                padding: const EdgeInsets.symmetric(
+                  vertical: 14,
+                  horizontal: 16,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(color: _P.b100),
                 ),
-                child: const Row(children: [
-                  Icon(Icons.info_outline_rounded, size: 16, color: _P.ink4),
-                  SizedBox(width: 8),
-                  Text('Tidak ada angkot langsung ke tujuan ini.',
-                      style: TextStyle(fontSize: 12, color: _P.ink3,
-                          fontWeight: FontWeight.w600)),
-                ]),
+                child: const Row(
+                  children: [
+                    Icon(Icons.info_outline_rounded, size: 16, color: _P.ink4),
+                    SizedBox(width: 8),
+                    Text(
+                      'Tidak ada angkot langsung ke tujuan ini.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: _P.ink3,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-  
+
           SizedBox(height: MediaQuery.of(context).padding.bottom + 12),
         ],
       ),
     );
   }
-  
+
   Widget _buildAngkotCard(Map<String, dynamic> angkot) {
     final warnaHex = angkot['warna_hex'] as String? ?? '#6B7280';
     final warna = Color(int.parse(warnaHex.replaceAll('#', '0xFF')));
@@ -2063,9 +2129,10 @@ class _LandingPageState extends State<LandingPage>
         border: Border.all(color: warna.withOpacity(0.25), width: 1.5),
         boxShadow: [
           BoxShadow(
-              color: warna.withOpacity(0.10),
-              blurRadius: 8,
-              offset: const Offset(0, 2)),
+            color: warna.withOpacity(0.10),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
         ],
       ),
       child: Column(
@@ -2073,67 +2140,77 @@ class _LandingPageState extends State<LandingPage>
         mainAxisSize: MainAxisSize.min, // ← tambah ini
         children: [
           // Nomor + warna badge
-          Row(children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: warna,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                angkot['kode'] as String? ?? '-',
-                style: const TextStyle(
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: warna,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  angkot['kode'] as String? ?? '-',
+                  style: const TextStyle(
                     color: Colors.white,
                     fontSize: 12,
-                    fontWeight: FontWeight.w900),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                angkot['perusahaan'] as String? ?? '',
-                style: const TextStyle(
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  angkot['perusahaan'] as String? ?? '',
+                  style: const TextStyle(
                     fontSize: 10,
                     color: _P.ink3,
-                    fontWeight: FontWeight.w700),
-                overflow: TextOverflow.ellipsis,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          ]),
+            ],
+          ),
           const SizedBox(height: 6),
           // Asal
-          Row(children: [
-            const Icon(Icons.trip_origin_rounded, size: 10, color: _P.b500),
-            const SizedBox(width: 4),
-            Expanded(
-              child: Text(
-                angkot['asal'] as String? ?? '-',
-                style: const TextStyle(
+          Row(
+            children: [
+              const Icon(Icons.trip_origin_rounded, size: 10, color: _P.b500),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  angkot['asal'] as String? ?? '-',
+                  style: const TextStyle(
                     fontSize: 10,
                     color: _P.ink2,
-                    fontWeight: FontWeight.w600),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          ]),
+            ],
+          ),
           const SizedBox(height: 2),
           // Tujuan
-          Row(children: [
-            Icon(Icons.location_on_rounded, size: 10, color: warna),
-            const SizedBox(width: 4),
-            Expanded(
-              child: Text(
-                angkot['tujuan'] as String? ?? '-',
-                style: const TextStyle(
+          Row(
+            children: [
+              Icon(Icons.location_on_rounded, size: 10, color: warna),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  angkot['tujuan'] as String? ?? '-',
+                  style: const TextStyle(
                     fontSize: 10,
                     color: _P.ink2,
-                    fontWeight: FontWeight.w600),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          ]),
+            ],
+          ),
           const SizedBox(height: 6),
           // PP badge
           if (angkot['pp'] == 1 || angkot['pp'] == true)
@@ -2143,11 +2220,14 @@ class _LandingPageState extends State<LandingPage>
                 color: _P.b50,
                 borderRadius: BorderRadius.circular(6),
               ),
-              child: const Text('Pulang Pergi',
-                  style: TextStyle(
-                      fontSize: 9,
-                      color: _P.b600,
-                      fontWeight: FontWeight.w700)),
+              child: const Text(
+                'Pulang Pergi',
+                style: TextStyle(
+                  fontSize: 9,
+                  color: _P.b600,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
             ),
         ],
       ),

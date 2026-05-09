@@ -47,6 +47,7 @@ class PredictionController extends Controller
 
         $distanceKm      = round($osrmData['distance'] / 1000, 1);
         $durationNormal  = (int) ($osrmData['duration'] / 60); // menit
+        $trafficDuration = $this->fetchGoogleTrafficDuration($originLat, $originLng, $destLat, $destLng);
         $encodedPolyline = $osrmData['encoded_polyline'];
 
         // ── 2. Ambil cuaca dari OpenWeatherMap ───────────────
@@ -56,6 +57,11 @@ class PredictionController extends Controller
         // ── 3. Prediksi ML ───────────────────────────────────
         $mlResult   = $this->ml->predict($originLat, $originLng, $destLat, $destLng, $weatherMain);
         $multiplier = $mlResult['travel_multiplier'];
+
+        $trafficRatio = 1.0;
+        if ($trafficDuration && $durationNormal > 0) {
+            $trafficRatio = round($trafficDuration / $durationNormal, 2);
+        }
 
         // ── 4. Hitung estimasi waktu ─────────────────────────
         $predictedMinutes = (int) round($durationNormal * $multiplier);
@@ -74,9 +80,18 @@ class PredictionController extends Controller
             'distance'         => $distanceKm . ' km',
 
             // ML result
+            // 'congestion_level' => $mlResult['congestion_level'],
+            // 'status_color'     => $mlResult['status_color'],
+            // 'travel_multiplier'=> $multiplier,
+
+            'traffic_ratio' => $trafficRatio,
+            'traffic_duration' => $trafficDuration ? $this->formatDuration($trafficDuration) : null,
+
             'congestion_level' => $mlResult['congestion_level'],
-            'status_color'     => $mlResult['status_color'],
-            'travel_multiplier'=> $multiplier,
+            'congestion_index' => $mlResult['congestion_index'],
+            'congestion_level_index' => $mlResult['congestion_level_index'],
+            'status_color' => $mlResult['status_color'],
+            'travel_multiplier' => $multiplier,
 
             // Polyline rute
             'encoded_polyline' => $encodedPolyline,
@@ -95,6 +110,54 @@ class PredictionController extends Controller
             'ml_features' => $mlResult['ml_features'],
         ]);
     }
+
+    /**
+     * Ambil durasi perjalanan realtime dari Google Directions API
+     * menggunakan traffic live.
+     */
+    private function fetchGoogleTrafficDuration(
+        float $originLat,
+        float $originLng,
+        float $destLat,
+        float $destLng
+    ): ?int
+    {
+        try {
+            $response = Http::timeout(10)->get(
+                'https://maps.googleapis.com/maps/api/directions/json',
+                [
+                    'origin' => "{$originLat},{$originLng}",
+                    'destination' => "{$destLat},{$destLng}",
+                    'departure_time' => 'now',
+                    'traffic_model' => 'best_guess',
+                    'mode' => 'driving',
+                    'key' => env('GOOGLE_MAPS_API_KEY'),
+                ]
+            );
+
+            $data = $response->json();
+            Log::info('GOOGLE TRAFFIC RESPONSE', $data);
+
+            if (($data['status'] ?? '') !== 'OK') {
+                return null;
+            }
+
+            $leg = $data['routes'][0]['legs'][0] ?? null;
+
+            if (!$leg) {
+                return null;
+            }
+
+            // duration_in_traffic dalam detik
+            return isset($leg['duration_in_traffic']['value'])
+                ? (int) round($leg['duration_in_traffic']['value'] / 60)
+                : null;
+
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
 
     // ── OSRM: Ambil rute gratis tanpa API key ─────────────────────────────
 
@@ -160,6 +223,7 @@ class PredictionController extends Controller
 
             if ($response->successful()) {
                 $data = $response->json();
+                Log::info('GOOGLE TRAFFIC RESPONSE', $data);
                 return [
                     'main'        => $data['weather'][0]['main'] ?? 'Clear',
                     'description' => $data['weather'][0]['description'] ?? 'Cerah',
