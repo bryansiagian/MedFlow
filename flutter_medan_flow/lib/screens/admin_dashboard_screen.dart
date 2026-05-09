@@ -666,15 +666,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         const TrafficHeatmapScreen(),
         null,
       ),
-      _Mod(
-        'Analisis Data AI',
-        'Laporan tren mingguan.',
-        Icons.analytics_rounded,
-        [const Color(0xFFF5F3FF), const Color(0xFFEDE9FE)],
-        const Color(0xFF7C3AED),
-        const AdminAnalyticsScreen(),
-        null,
-      ),
     ];
 
     return Padding(
