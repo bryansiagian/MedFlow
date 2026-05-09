@@ -658,8 +658,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         'Live',
       ),
       _Mod(
-        'Peta Panas (Heatmap)',
-        'Analisis titik kemacetan.',
+        'Prediksi Kemacetan',
+        'Memprediksi kemacetan di sekitar',
         Icons.whatshot_rounded,
         [const Color(0xFFFFF7ED), const Color(0xFFFED7AA)],
         const Color(0xFFEA580C),
