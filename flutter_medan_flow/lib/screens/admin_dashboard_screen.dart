@@ -11,9 +11,6 @@ import 'admin_analytics_screen.dart';
 import 'driver_approval_screen.dart';
 import 'landing_page.dart';
 
-// ─────────────────────────────────────────────
-// Palette (same as LandingPage & other screens)
-// ─────────────────────────────────────────────
 class _P {
   static const b50 = Color(0xFFEFF6FF);
   static const b100 = Color(0xFFDBEAFE);
@@ -42,17 +39,20 @@ class AdminDashboardScreen extends StatefulWidget {
 
 class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     with SingleTickerProviderStateMixin {
-  // ── Data (unchanged) ─────────────────────────────────────────
-  Map<String, dynamic>? _weatherData;
-  bool _isLoadingWeather = true;
 
-  // ── Animation ────────────────────────────────────────────────
+  // ── State ─────────────────────────────────────────────────────
+  Map<String, dynamic>? _weatherData;
+  Map<String, dynamic>? _dashboardStats;        // ← BARU
+  bool _isLoadingWeather = true;
+  bool _isLoadingStats = true;                  // ← BARU
+
   late AnimationController _orbCtrl;
 
   @override
   void initState() {
     super.initState();
     _fetchWeather();
+    _fetchDashboardStats();                     // ← BARU
     _orbCtrl = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 10),
@@ -65,7 +65,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     super.dispose();
   }
 
-  // ── Logic (unchanged) ────────────────────────────────────────
+  // ── Fetch weather ─────────────────────────────────────────────
   Future<void> _fetchWeather() async {
     try {
       final response = await http.get(
@@ -83,6 +83,28 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     }
   }
 
+  // ── Fetch dashboard stats ─────────────────────────────────────
+  // ← BARU: method ini menggantikan data hardcoded '142' dan 'Low'
+  Future<void> _fetchDashboardStats() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiService().baseUrl}/admin/stats'),
+      );
+      if (response.statusCode == 200) {
+        setState(() {
+          _dashboardStats = jsonDecode(response.body);
+          _isLoadingStats = false;
+        });
+      } else {
+        setState(() => _isLoadingStats = false);
+      }
+    } catch (e) {
+      debugPrint('Gagal muat dashboard stats: $e');
+      setState(() => _isLoadingStats = false);
+    }
+  }
+
+  // ── Logout ────────────────────────────────────────────────────
   void _showLogoutConfirmation() {
     showDialog(
       context: context,
@@ -162,9 +184,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                         if (!mounted) return;
                         Navigator.pushAndRemoveUntil(
                           context,
-                          MaterialPageRoute(
-                            builder: (_) => const LandingPage(),
-                          ),
+                          MaterialPageRoute(builder: (_) => const LandingPage()),
                           (route) => false,
                         );
                       },
@@ -308,10 +328,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
               ),
             ],
           ),
-          // Action buttons
           Row(
             children: [
-              _headerBtn(Icons.refresh_rounded, onTap: _fetchWeather),
+              // ← BARU: refresh juga reload stats
+              _headerBtn(Icons.refresh_rounded, onTap: () {
+                _fetchWeather();
+                _fetchDashboardStats();
+              }),
               const SizedBox(width: 8),
               _headerBtn(
                 Icons.logout_rounded,
@@ -409,7 +432,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
       ),
       child: Stack(
         children: [
-          // Radial gloss
           Positioned.fill(
             child: ClipRRect(
               borderRadius: BorderRadius.circular(22),
@@ -429,7 +451,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           ),
           Row(
             children: [
-              // Left: label + condition + location
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -458,11 +479,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                     const SizedBox(height: 4),
                     Row(
                       children: const [
-                        Icon(
-                          Icons.location_on_outlined,
-                          color: Colors.white54,
-                          size: 11,
-                        ),
+                        Icon(Icons.location_on_outlined,
+                            color: Colors.white54, size: 11),
                         SizedBox(width: 2),
                         Text(
                           'Medan Kota',
@@ -477,15 +495,11 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                   ],
                 ),
               ),
-              // Right: icon + temp
               Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(
-                    Icons.cloudy_snowing,
-                    color: Colors.white,
-                    size: 38,
-                  ),
+                  const Icon(Icons.cloudy_snowing,
+                      color: Colors.white, size: 38),
                   const SizedBox(height: 4),
                   Text(
                     _weatherData?['temp'] ?? '—',
@@ -504,7 +518,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     );
   }
 
-  // ── Section Label ────────────────────────────────────────────
+  // ── Section Label ─────────────────────────────────────────────
   Widget _sectionLabel(String label) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
@@ -520,24 +534,32 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     );
   }
 
-  // ── Quick Stats ──────────────────────────────────────────────
+  // ── Quick Stats ───────────────────────────────────────────────
+  // ← BERUBAH: baca dari _dashboardStats, tampilkan loading indicator
   Widget _buildQuickStats() {
+    final overview = _dashboardStats?['overview'];
+    final angkotOnline = overview?['active_angkots']?.toString() ?? '—';
+    final congestion = overview?['congestion_index'] ?? '—';
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
       child: Row(
         children: [
           _statCard(
-            '142',
-            'Angkot Online',
+            _isLoadingStats ? '...' : angkotOnline,
+            'Angkot Menarik',
             Icons.directions_bus_rounded,
             [const Color(0xFFE0F2FE), const Color(0xFFBAE6FD)],
             const Color(0xFF0EA5E9),
           ),
           const SizedBox(width: 12),
-          _statCard('Low', 'Index Macet', Icons.speed_rounded, [
-            const Color(0xFFF0FDF4),
-            const Color(0xFFDCFCE7),
-          ], const Color(0xFF16A34A)),
+          _statCard(
+            _isLoadingStats ? '...' : congestion,
+            'Index Macet',
+            Icons.speed_rounded,
+            [const Color(0xFFF0FDF4), const Color(0xFFDCFCE7)],
+            const Color(0xFF16A34A),
+          ),
         ],
       ),
     );
@@ -605,7 +627,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     );
   }
 
-  // ── Module List ──────────────────────────────────────────────
+  // ── Module List ───────────────────────────────────────────────
   Widget _buildModuleList() {
     final modules = [
       _Mod(
@@ -679,7 +701,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                   ),
                   child: Row(
                     children: [
-                      // Icon
                       Container(
                         width: 50,
                         height: 50,
@@ -694,7 +715,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                         child: Icon(m.icon, color: m.iconColor, size: 24),
                       ),
                       const SizedBox(width: 14),
-                      // Text
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -719,7 +739,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                           ],
                         ),
                       ),
-                      // Badge + chevron
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
